@@ -13,3 +13,11 @@ composer.json
 composer.phar
 composer.lock
 vendor
+
+# docker-compose
+docker-compose.yml
+docker-compose.env
+
+# misc
+roundcube-env.txt
+roundcubemail.sql
