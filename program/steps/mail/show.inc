@@ -46,13 +46,12 @@ if ($uid) {
         $RCMAIL->config->set('prefer_html', $_SESSION['msg_formats'][$mbox_name.':'.$uid]);
     }
 
-    $MESSAGE = new rcube_message($uid);
+    $MESSAGE = new rcube_message($uid, $mbox_name, intval($_GET['_safe']));
 
     // if message not found (wrong UID)...
     if (empty($MESSAGE->headers)) {
         rcmail_message_error($uid);
     }
-
 
     // show images?
     rcmail_check_safe($MESSAGE);
@@ -330,7 +329,7 @@ function rcmail_contact_exists($email)
         $CONTACTS = $RCMAIL->get_address_book(-1, true);
 
         if (is_object($CONTACTS)) {
-            $existing = $CONTACTS->search('email', $email, true, false);
+            $existing = $CONTACTS->search('email', $email, 1, false);
             if ($existing->count) {
                 return true;
             }

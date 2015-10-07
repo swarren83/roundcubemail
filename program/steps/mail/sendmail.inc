@@ -128,52 +128,25 @@ $headers = array();
 
 // if configured, the Received headers goes to top, for good measure
 if ($RCMAIL->config->get('http_received_header')) {
-    $nldlm   = "\r\n\t";
-    $encrypt = $RCMAIL->config->get('http_received_header_encrypt');
-
-    // FROM/VIA
+    $nldlm       = "\r\n\t";
     $http_header = 'from ';
 
+    // FROM/VIA
     if (!empty($_SERVER['HTTP_X_FORWARDED_FOR'])) {
-        $hosts    = explode(',', $_SERVER['HTTP_X_FORWARDED_FOR'], 2);
-        $hostname = gethostbyaddr($hosts[0]);
-
-        if ($encrypt) {
-            $http_header .= rcmail_encrypt_header($hostname);
-            if ($host != $hostname)
-                $http_header .= ' ('. rcmail_encrypt_header($host) . ')';
-        }
-        else {
-            $http_header .= (($host != $hostname) ? $hostname : '[' . $host . ']');
-            if ($host != $hostname)
-                $http_header .= ' (['. $host .'])';
-        }
-        $http_header .= $nldlm . ' via ';
+        $hosts        = explode(',', $_SERVER['HTTP_X_FORWARDED_FOR'], 2);
+        $http_header .= rcmail_received_host($hosts[0]) . $nldlm . ' via ';
     }
 
-    $host     = $_SERVER['REMOTE_ADDR'];
-    $hostname = gethostbyaddr($host);
-
-    if ($encrypt) {
-        $http_header .= rcmail_encrypt_header($hostname);
-        if ($host != $hostname)
-            $http_header .= ' ('. rcmail_encrypt_header($host) . ')';
-    }
-    else {
-        $http_header .= (($host != $hostname) ? $hostname : '[' . $host . ']');
-        if ($host != $hostname)
-            $http_header .= ' (['. $host .'])';
-    }
+    $http_header .= rcmail_received_host($_SERVER['REMOTE_ADDR']);
 
     // BY
     $http_header .= $nldlm . 'by ' . $_SERVER['HTTP_HOST'];
 
     // WITH
-    $http_header .= $nldlm . 'with HTTP (' . $_SERVER['SERVER_PROTOCOL'] .
-      ' '.$_SERVER['REQUEST_METHOD'] . '); ' . date('r');
-    $http_header = wordwrap($http_header, 69, $nldlm);
+    $http_header .= $nldlm . 'with HTTP (' . $_SERVER['SERVER_PROTOCOL']
+        . ' ' . $_SERVER['REQUEST_METHOD'] . '); ' . date('r');
 
-    $headers['Received'] = $http_header;
+    $headers['Received'] = wordwrap($http_header, 69, $nldlm);
 }
 
 $headers['Date'] = $RCMAIL->user_date();
@@ -272,6 +245,19 @@ $isHtml = (bool) rcube_utils::get_input_value('_is_html', rcube_utils::INPUT_POS
 
 // fetch message body
 $message_body = rcube_utils::get_input_value('_message', rcube_utils::INPUT_POST, TRUE, $message_charset);
+
+if (isset($_POST['_pgpmime'])) {
+    $pgp_mime     = rcube_utils::get_input_value('_pgpmime', rcube_utils::INPUT_POST);
+    $isHtml       = false;
+    $message_body = '';
+
+    // clear unencrypted attachments
+    foreach ((array) $COMPOSE['attachments'] as $attach) {
+        $RCMAIL->plugins->exec_hook('attachment_delete', $attach);
+    }
+
+    $COMPOSE['attachments'] = array();
+}
 
 if ($isHtml) {
     $bstyle = array();
@@ -398,12 +384,8 @@ if ($isHtml) {
 
     $MAIL_MIME->setHTMLBody($plugin['body']);
 
-    // replace emoticons
-    $plugin['body'] = $RCMAIL->replace_emoticons($plugin['body']);
-
-    // add a plain text version of the e-mail as an alternative part.
-    $h2t = new rcube_html2text($plugin['body'], false, true, 0, $message_charset);
-    $plainTextPart = rcube_mime::wordwrap($h2t->get_text(), $LINE_LENGTH, "\r\n", false, $message_charset);
+    $plainTextPart = $RCMAIL->html2text($plugin['body'], array('width' => 0, 'charset' => $message_charset));
+    $plainTextPart = rcube_mime::wordwrap($plainTextPart, $LINE_LENGTH, "\r\n", false, $message_charset);
     $plainTextPart = wordwrap($plainTextPart, 998, "\r\n", true);
 
     // make sure all line endings are CRLF (#1486712)
@@ -412,11 +394,8 @@ if ($isHtml) {
     $plugin = $RCMAIL->plugins->exec_hook('message_outgoing_body',
         array('body' => $plainTextPart, 'type' => 'alternative', 'message' => $MAIL_MIME));
 
+    // add a plain text version of the e-mail as an alternative part.
     $MAIL_MIME->setTXTBody($plugin['body']);
-
-    // look for "emoticon" images from TinyMCE and change their src paths to
-    // be file paths on the server instead of URL paths.
-    rcmail_fix_emoticon_paths($MAIL_MIME);
 
     // Extract image Data URIs into message attachments (#1488502)
     rcmail_extract_inline_images($MAIL_MIME, $from);
@@ -507,6 +486,23 @@ else {
 
 if ($flowed) {
     $text_charset .= ";\r\n format=flowed";
+}
+
+// compose PGP/Mime message
+if ($pgp_mime) {
+    $MAIL_MIME->addAttachment(new Mail_mimePart('Version: 1', array(
+            'content_type' => 'application/pgp-encrypted',
+            'description'  => 'PGP/MIME version identification',
+    )));
+
+    $MAIL_MIME->addAttachment(new Mail_mimePart($pgp_mime, array(
+            'content_type' => 'application/octet-stream',
+            'filename'     => 'encrypted.asc',
+            'disposition'  => 'inline',
+    )));
+
+    $MAIL_MIME->setContentType('multipart/encrypted', array('protocol' => 'application/pgp-encrypted'));
+    $MAIL_MIME->setParam('preamble', 'This is an OpenPGP/MIME encrypted message (RFC 2440 and 3156)');
 }
 
 // encoding settings for mail composing
@@ -730,16 +726,33 @@ $OUTPUT->send('iframe');
 
 /****** message sending functions ********/
 
-// encrypt parts of the header
-function rcmail_encrypt_header($what)
+function rcmail_received_host($host)
+{
+    $hostname = gethostbyaddr($host);
+
+    $result = rcmail_encrypt_host($hostname);
+
+    if ($host != $hostname) {
+        $result .= ' (' . rcmail_encrypt_host($host) . ')';
+    }
+
+    return $result;
+}
+
+// encrypt host IP or hostname for Received header
+function rcmail_encrypt_host($host)
 {
     global $RCMAIL;
 
-    if (!$RCMAIL->config->get('http_received_header_encrypt')) {
-        return $what;
+    if ($RCMAIL->config->get('http_received_header_encrypt')) {
+        return $RCMAIL->encrypt($host);
     }
 
-    return $RCMAIL->encrypt($what);
+    if (!preg_match('/[^0-9:.]/', $host)) {
+        return "[$host]";
+    }
+
+    return $host;
 }
 
 // get identity record
@@ -763,61 +776,6 @@ function rcmail_get_identity($id)
     }
 
     return false;
-}
-
-/**
- * go from this:
- * <img src="http[s]://.../tinymce/plugins/emoticons/img/smiley-cool.gif" border="0" alt="Cool" title="Cool" />
- *
- * to this:
- *
- * <img src="/path/on/server/.../tinymce/plugins/emoticons/img/smiley-cool.gif" border="0" alt="Cool" title="Cool" />
- */
-function rcmail_fix_emoticon_paths($mime_message)
-{
-    global $RCMAIL;
-
-    $body = $mime_message->getHTMLBody();
-
-    // remove any null-byte characters before parsing
-    $body = preg_replace('/\x00/', '', $body);
-
-    $searchstr  = 'program/js/tinymce/plugins/emoticons/img/';
-    $assets_dir = $RCMAIL->config->get('assets_dir');
-    $path       = ($assets_dir ?: INSTALL_PATH) . '/' . $searchstr;
-    $offset     = 0;
-
-    // keep track of added images, so they're only added once
-    $included_images = array();
-
-    if (preg_match_all('# src=[\'"]([^\'"]+)#', $body, $matches, PREG_OFFSET_CAPTURE)) {
-        foreach ($matches[1] as $m) {
-            // find emoticon image tags
-            if (preg_match('#'.$searchstr.'(.*)$#', $m[0], $imatches)) {
-                $image_name = $imatches[1];
-
-                // sanitize image name so resulting attachment doesn't leave images dir
-                $image_name = preg_replace('/[^a-zA-Z0-9_\.\-]/i', '', $image_name);
-                $img_file   = $path . $image_name;
-
-                if (!in_array($image_name, $included_images)) {
-                    // add the image to the MIME message
-                    $res = $mime_message->addHTMLImage($img_file, 'image/gif', '', true, $image_name);
-                    if (is_a($res, 'PEAR_Error')) {
-                        $RCMAIL->output->show_message("emoticonerror", 'error');
-                        continue;
-                    }
-
-                    array_push($included_images, $image_name);
-                }
-
-                $body    = substr_replace($body, $img_file, $m[1] + $offset, strlen($m[0]));
-                $offset += strlen($img_file) - strlen($m[0]);
-            }
-        }
-    }
-
-    $mime_message->setHTMLBody($body);
 }
 
 /**

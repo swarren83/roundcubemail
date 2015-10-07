@@ -85,7 +85,10 @@ $OUTPUT->add_label('nosubject', 'nosenderwarning', 'norecipientwarning', 'nosubj
     'messagesaved', 'converting', 'editorwarning', 'searching', 'uploading', 'uploadingmany',
     'fileuploaderror', 'sendmessage', 'newresponse', 'responsename', 'responsetext', 'save',
     'savingresponse', 'restoresavedcomposedata', 'restoremessage', 'delete', 'restore', 'ignore',
-    'selectimportfile', 'messageissent');
+    'selectimportfile', 'messageissent', 'loadingdata', 'nopubkeyfor', 'nopubkeyforsender',
+    'encryptnoattachments','encryptedsendialog','searchpubkeyservers', 'importpubkeys',
+    'encryptpubkeysfound',  'search', 'close', 'import', 'keyid', 'keylength', 'keyexpired',
+    'keyrevoked', 'keyimportsuccess', 'keyservererror');
 
 $OUTPUT->set_pagetitle($RCMAIL->gettext('compose'));
 
@@ -317,7 +320,8 @@ function rcmail_process_compose_params(&$COMPOSE)
         // #1486037: remove "mailto:" prefix
         $COMPOSE['param']['to'] = preg_replace('/^mailto:/i', '', $mailto[0]);
         // #1490346: decode the recipient address
-        $COMPOSE['param']['to'] = urldecode($COMPOSE['param']['to']);
+        // #1490510: use raw encoding for correct "+" character handling as specified in RFC6068
+        $COMPOSE['param']['to'] = rawurldecode($COMPOSE['param']['to']);
 
         // Supported case-insensitive tokens in mailto URL
         $url_tokens = array('to', 'cc', 'bcc', 'reply-to', 'in-reply-to', 'references', 'subject', 'body');
@@ -483,7 +487,9 @@ function rcmail_compose_header_from($attrib)
         $top_posting  = intval($RCMAIL->config->get('reply_mode')) > 0
             && !$RCMAIL->config->get('sig_below')
             && ($COMPOSE['mode'] == RCUBE_COMPOSE_REPLY || $COMPOSE['mode'] == RCUBE_COMPOSE_FORWARD);
-        $separator = $top_posting ? '---' : '-- ';
+
+        $separator     = $top_posting ? '---' : '-- ';
+        $add_separator = (bool) $RCMAIL->config->get('sig_separator');
 
         $field_attrib['onchange'] = rcmail_output::JS_OBJECT_NAME.".change_identity(this)";
         $select_from = new html_select($field_attrib);
@@ -498,16 +504,16 @@ function rcmail_compose_header_from($attrib)
                 $text = $html = $sql_arr['signature'];
 
                 if ($sql_arr['html_signature']) {
-                    $h2t  = new rcube_html2text($html, false, true);
-                    $text = trim($h2t->get_text());
+                    $text = $RCMAIL->html2text($html, array('links' => false));
+                    $text = trim($text, "\r\n");
                 }
                 else {
                     $t2h  = new rcube_text2html($text, false);
                     $html = $t2h->get_html();
                 }
 
-                if (!preg_match('/^--[ -]\r?\n/m', $text)) {
-                    $text = $separator . "\n" . $text;
+                if ($add_separator && !preg_match('/^--[ -]\r?\n/m', $text)) {
+                    $text = $separator . "\n" . ltrim($text, "\r\n");
                     $html = $separator . "<br>" . $html;
                 }
 
@@ -522,6 +528,8 @@ function rcmail_compose_header_from($attrib)
             if (!empty($sql_arr['bcc'])) {
                 $identities[$identity_id]['bcc'] = $sql_arr['bcc'];
             }
+
+            $identities[$identity_id]['email'] = $sql_arr['email'];
         }
 
         $out = $select_from->show($MESSAGE->compose['from']);
@@ -716,13 +724,14 @@ function rcmail_compose_editor_mode()
         $useHtml = rcmail_message_is_html();
     }
     else if ($compose_mode == RCUBE_COMPOSE_REPLY) {
-        $useHtml = ($html_editor == 1 || ($html_editor >= 2 && rcmail_message_is_html()));
+        $useHtml = $html_editor == 1 || ($html_editor >= 2 && rcmail_message_is_html());
     }
     else if ($compose_mode == RCUBE_COMPOSE_FORWARD) {
-        $useHtml = ($html_editor == 1 || ($html_editor == 3 && rcmail_message_is_html()));
+        $useHtml = $html_editor == 1 || $html_editor == 4
+            || ($html_editor == 3 && rcmail_message_is_html());
     }
     else {
-        $useHtml = ($html_editor == 1);
+        $useHtml = $html_editor == 1 || $html_editor == 4;
     }
 
     return $useHtml;
@@ -771,6 +780,18 @@ function rcmail_prepare_message_body()
             }
 
             foreach ($MESSAGE->parts as $part) {
+                if ($part->realtype == 'multipart/encrypted') {
+                    // find the encrypted message payload part
+                    if ($pgp_mime_part = $MESSAGE->get_multipart_encrypted_part()) {
+                        $RCMAIL->output->set_env('pgp_mime_message', array(
+                            '_mbox' => $RCMAIL->storage->get_folder(),
+                            '_uid'  => $MESSAGE->uid,
+                            '_part' => $pgp_mime_part->mime_id,
+                        ));
+                    }
+                    continue;
+                }
+
                 // skip no-content and attachment parts (#1488557)
                 if ($part->type != 'content' || !$part->size || $MESSAGE->is_attachment($part)) {
                     continue;
@@ -793,14 +814,21 @@ function rcmail_prepare_message_body()
         }
 
         // compose reply-body
-        if ($COMPOSE['mode'] == RCUBE_COMPOSE_REPLY)
+        if ($COMPOSE['mode'] == RCUBE_COMPOSE_REPLY) {
             $body = rcmail_create_reply_body($body, $isHtml);
+
+            if ($MESSAGE->pgp_mime) {
+                $RCMAIL->output->set_env('compose_reply_header', rcmail_get_reply_header($MESSAGE));
+            }
+        }
         // forward message body inline
-        else if ($COMPOSE['mode'] == RCUBE_COMPOSE_FORWARD)
+        else if ($COMPOSE['mode'] == RCUBE_COMPOSE_FORWARD) {
             $body = rcmail_create_forward_body($body, $isHtml);
+        }
         // load draft message body
-        else if ($COMPOSE['mode'] == RCUBE_COMPOSE_DRAFT || $COMPOSE['mode'] == RCUBE_COMPOSE_EDIT)
+        else if ($COMPOSE['mode'] == RCUBE_COMPOSE_DRAFT || $COMPOSE['mode'] == RCUBE_COMPOSE_EDIT) {
             $body = rcmail_create_draft_body($body, $isHtml);
+        }
     }
     else { // new message
         $isHtml = rcmail_compose_editor_mode();
@@ -830,7 +858,7 @@ function rcmail_prepare_message_body()
 
 function rcmail_compose_part_body($part, $isHtml = false)
 {
-    global $RCMAIL, $MESSAGE, $LINE_LENGTH;
+    global $RCMAIL, $COMPOSE, $MESSAGE, $LINE_LENGTH;
 
     // Check if we have enough memory to handle the message in it
     // #1487424: we need up to 10x more memory than the body
@@ -844,6 +872,14 @@ function rcmail_compose_part_body($part, $isHtml = false)
     // message is cached but not exists (#1485443), or other error
     if ($body === false) {
         return '';
+    }
+
+    // register this part as pgp encrypted
+    if (strpos($body, '-----BEGIN PGP MESSAGE-----') !== false) {
+        $MESSAGE->pgp_mime = true;
+        $RCMAIL->output->set_env('pgp_mime_message', array(
+            '_mbox' => $RCMAIL->storage->get_folder(), '_uid' => $MESSAGE->uid, '_part' => $part->mime_id,
+        ));
     }
 
     if ($isHtml) {
@@ -873,9 +909,8 @@ function rcmail_compose_part_body($part, $isHtml = false)
         if ($part->ctype_secondary == 'html') {
             // use html part if it has been used for message (pre)viewing
             // decrease line length for quoting
-            $len = $COMPOSE['mode'] == RCUBE_COMPOSE_REPLY ? $LINE_LENGTH-2 : $LINE_LENGTH;
-            $txt = new rcube_html2text($body, false, true, $len);
-            $body = $txt->get_text();
+            $len  = $COMPOSE['mode'] == RCUBE_COMPOSE_REPLY ? $LINE_LENGTH-2 : $LINE_LENGTH;
+            $body = $RCMAIL->html2text($body, array('width' => $len));
         }
         else {
             if ($part->ctype_secondary == 'plain' && $part->ctype_parameters['format'] == 'flowed') {
@@ -1012,16 +1047,7 @@ function rcmail_create_reply_body($body, $bodyIsHtml)
 {
     global $RCMAIL, $MESSAGE, $LINE_LENGTH;
 
-    // build reply prefix
-    $from = array_pop(rcube_mime::decode_address_list($MESSAGE->get_header('from'), 1, false, $MESSAGE->headers->charset));
-    $prefix = $RCMAIL->gettext(array(
-        'name' => 'mailreplyintro',
-        'vars' => array(
-            'date'   => $RCMAIL->format_date($MESSAGE->headers->date, $RCMAIL->config->get('date_long')),
-            'sender' => $from['name'] ? $from['name'] : rcube_utils::idn_to_utf8($from['mailto']),
-        )
-    ));
-
+    $prefix = rcmail_get_reply_header($MESSAGE);
     $reply_mode = intval($RCMAIL->config->get('reply_mode'));
 
     if (!$bodyIsHtml) {
@@ -1058,13 +1084,26 @@ function rcmail_create_reply_body($body, $bodyIsHtml)
             $suffix = '</blockquote>';
         }
         else {
-            $suffix = '</blockquote><p></p>';
+            $suffix = '</blockquote><p><br/></p>';
         }
     }
 
     return $prefix . $body . $suffix;
 }
 
+function rcmail_get_reply_header($message)
+{
+    global $RCMAIL;
+
+    $from = array_pop(rcube_mime::decode_address_list($message->get_header('from'), 1, false, $message->headers->charset));
+    return $RCMAIL->gettext(array(
+        'name' => 'mailreplyintro',
+        'vars' => array(
+            'date'   => $RCMAIL->format_date($message->headers->date, $RCMAIL->config->get('date_long')),
+            'sender' => $from['name'] ?: rcube_utils::idn_to_utf8($from['mailto']),
+        )
+    ));
+}
 
 function rcmail_create_forward_body($body, $bodyIsHtml)
 {
@@ -1208,6 +1247,10 @@ function rcmail_write_compose_attachments(&$message, $bodyIsHtml)
     $cid_map  = array();
     $messages = array();
 
+    if ($message->pgp_mime) {
+        return $cid_map;
+    }
+
     foreach ((array)$message->mime_parts as $pid => $part) {
         if ($part->disposition == 'attachment' || ($part->disposition == 'inline' && $bodyIsHtml) || $part->filename) {
             // skip parts that aren't valid attachments
@@ -1222,6 +1265,11 @@ function rcmail_write_compose_attachments(&$message, $bodyIsHtml)
 
             // skip inline images when forwarding in text mode
             if ($part->content_id && $part->disposition == 'inline' && !$bodyIsHtml && $COMPOSE['mode'] == RCUBE_COMPOSE_FORWARD) {
+                continue;
+            }
+
+            // skip version.txt parts of multipart/encrypted messages
+            if ($message->pgp_mime && $part->mimetype == 'application/pgp-encrypted' && $part->filename == 'version.txt') {
                 continue;
             }
 
@@ -1274,6 +1322,11 @@ function rcmail_write_inline_attachments(&$message)
     global $RCMAIL, $COMPOSE;
 
     $cid_map = array();
+
+    if ($message->pgp_mime) {
+        return $cid_map;
+    }
+
     foreach ((array)$message->mime_parts as $pid => $part) {
         if (($part->content_id || $part->content_location) && $part->filename) {
             if ($attachment = rcmail_save_attachment($message, $pid)) {
@@ -1300,6 +1353,10 @@ function rcmail_write_forward_attachments()
     $storage = $RCMAIL->get_storage();
     $names   = array();
     $refs    = array();
+
+    if ($MESSAGE->pgp_mime) {
+        return;
+    }
 
     $loaded_attachments = array();
     foreach ((array)$COMPOSE['attachments'] as $attachment) {

@@ -28,12 +28,27 @@ $labels['keytype'] = 'Key type';
 $labels['fingerprint'] = 'Fingerprint';
 $labels['subkeys'] = 'Subkeys';
 $labels['basicinfo'] = 'Basic Information';
-$labels['userids'] = 'Additional User IDs';
+$labels['userids'] = 'Additional Users';
 $labels['typepublickey'] = 'public key';
 $labels['typekeypair'] = 'key pair';
 $labels['keyattfound'] = 'This message contains attached PGP key(s).';
 $labels['keyattimport'] = 'Import key(s)';
+$labels['typesign'] = 'Sign';
+$labels['typeencrypt'] = 'Encrypt';
+$labels['typecert'] = 'Certify';
+$labels['typeauth'] = 'Authentication';
+$labels['subkeyid'] = 'ID';
+$labels['subkeyalgo'] = 'Algorithm';
+$labels['subkeycreated'] = 'Created';
+$labels['subkeyexpires'] = 'Expires';
+$labels['subkeyusage'] = 'Usage';
+$labels['expiresnever'] = 'never';
+$labels['unknown'] = 'unknown';
+$labels['uservalid'] = 'Valid';
+$labels['userid'] = 'ID';
+$labels['valid'] = 'valid';
 
+$labels['supportencryption'] = 'Enable message encryption and signing';
 $labels['supportsignatures'] = 'Enable message signatures verification';
 $labels['supportdecryption'] = 'Enable message decryption';
 $labels['signdefault'] = 'Sign all messages by default';
@@ -66,6 +81,7 @@ $labels['signmsg'] = 'Digitally sign this message';
 
 $labels['enterkeypasstitle'] = 'Enter key passphrase';
 $labels['enterkeypass'] = 'A passphrase is needed to unlock the secret key ($keyid) for user: $user.';
+$labels['arialabelkeyexportoptions'] = 'Keys export options';
 
 $messages = array();
 $messages['sigvalid'] = 'Verified signature from $sender.';

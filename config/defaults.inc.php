@@ -21,9 +21,10 @@ $config = array();
 
 // Database connection string (DSN) for read+write operations
 // Format (compatible with PEAR MDB2): db_provider://user:password@host/database
-// Currently supported db_providers: mysql, pgsql, sqlite, mssql or sqlsrv
+// Currently supported db_providers: mysql, pgsql, sqlite, mssql, sqlsrv, oracle
 // For examples see http://pear.php.net/manual/en/package.database.mdb2.intro-dsn.php
-// NOTE: for SQLite use absolute path: 'sqlite:////full/path/to/sqlite.db?mode=0646'
+// NOTE: for SQLite use absolute path (Linux): 'sqlite:////full/path/to/sqlite.db?mode=0646'
+//       or (Windows): 'sqlite:///C:/full/path/to/sqlite.db'
 $config['db_dsnw'] = 'mysql://roundcube:@localhost/roundcubemail';
 
 // Database DSN for read-only operations (if empty write database will be used)
@@ -165,6 +166,11 @@ $config['imap_auth_pw'] = null;
 // Otherwise it will be determined automatically
 $config['imap_delimiter'] = null;
 
+// If you know your imap's folder vendor, you can specify it here.
+// Otherwise it will be determined automatically. Use lower-case
+// identifiers, e.g. 'dovecot', 'cyrus', 'gmail', 'hmail', 'uw-imap'.
+$config['imap_vendor'] = null;
+
 // If IMAP server doesn't support NAMESPACE extension, but you're
 // using shared folders or personal root folder is non-empty, you'll need to
 // set these options. All can be strings or arrays of strings.
@@ -190,6 +196,11 @@ $config['imap_force_lsub'] = false;
 // Some server configurations (e.g. Courier) doesn't list folders in all namespaces
 // Enable this option to force listing of folders in all namespaces
 $config['imap_force_ns'] = false;
+
+// Some servers return hidden folders (name starting witha dot)
+// from user home directory. IMAP RFC does not forbid that.
+// Enable this option to hide them and disable possibility to create such.
+$config['imap_skip_hidden_folders'] = false;
 
 // List of disabled imap extensions.
 // Use if your IMAP server has broken implementation of some feature
@@ -436,10 +447,15 @@ $config['referer_check'] = false;
 // Possible values: sameorigin|deny. Set to false in order to disable sending them
 $config['x_frame_options'] = 'sameorigin';
 
-// this key is used to encrypt the users imap password which is stored
-// in the session record (and the client cookie if remember password is enabled).
-// please provide a string of exactly 24 chars.
+// This key is used for encrypting purposes, like storing of imap password
+// in the session. For historical reasons it's called DES_key, but it's used
+// with any configured cipher_method (see below).
 $config['des_key'] = 'rcmail-!24ByteDESkey*Str';
+
+// Encryption algorithm. You can use any method supported by openssl.
+// Default is set for backward compatibility to DES-EDE3-CBC,
+// but you can choose e.g. AES-256-CBC which we consider a better choice.
+$config['cipher_method'] = 'DES-EDE3-CBC';
 
 // Automatically add this domain to user names for login
 // Only for IMAP servers that require full e-mail addresses for login
@@ -671,8 +687,6 @@ $config['show_real_foldernames'] = false;
 $config['quota_zero_as_unlimited'] = false;
 
 // Make use of the built-in spell checker. It is based on GoogieSpell.
-// Since Google only accepts connections over https your PHP installatation
-// requires to be compiled with Open SSL support
 $config['enable_spellcheck'] = true;
 
 // Enables spellchecker exceptions dictionary.
@@ -1015,7 +1029,11 @@ $config['message_extwin'] = false;
 $config['compose_extwin'] = false;
 
 // compose html formatted messages by default
-// 0 - never, 1 - always, 2 - on reply to HTML message, 3 - on forward or reply to HTML message
+//  0 - never,
+//  1 - always,
+//  2 - on reply to HTML message,
+//  3 - on forward or reply to HTML message
+//  4 - always, except when replying to plain text message
 $config['htmleditor'] = 0;
 
 // save copies of compose messages in the browser's local storage
@@ -1101,6 +1119,9 @@ $config['show_sig'] = 1;
 // Sometimes it might be convenient to start the reply on top but keep
 // the signature below the quoted text (sig_below = true).
 $config['sig_below'] = false;
+
+// Enables adding of standard separator to the signature
+$config['sig_separator'] = true;
 
 // Use MIME encoding (quoted-printable) for 8bit characters in message body
 $config['force_7bit'] = false;

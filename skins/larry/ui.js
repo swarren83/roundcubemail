@@ -174,11 +174,15 @@ function rcube_mail_ui()
       }
       else if (rcmail.env.action == 'compose') {
         rcmail.addEventListener('aftersend-attachment', show_uploadform)
-          .addEventListener('add-recipient', function(p){ show_header_row(p.field, true); })
-          .addEventListener('aftertoggle-editor', function(e){
+          .addEventListener('aftertoggle-editor', function(e) {
             window.setTimeout(function(){ layout_composeview() }, 200);
             if (e && e.mode)
               $("select[name='editorSelector']").val(e.mode);
+          })
+          .addEventListener('compose-encrypted', function(e) {
+            $("select[name='editorSelector']").prop('disabled', e.active);
+            $('a.button.attach, a.button.responses')[(e.active?'addClass':'removeClass')]('disabled');
+            $('#responseslist a.insertresponse')[(e.active?'removeClass':'addClass')]('active');
           });
 
         // Show input elements with non-empty value
@@ -467,6 +471,14 @@ function rcube_mail_ui()
     if (!$('#attachment-list li').length) {
       $('div.rightcol').hide().attr('aria-hidden', 'true');
       $('div.leftcol').css('margin-right', '0');
+    }
+
+    var mvlpe = $('#messagebody.mailvelope');
+    if (mvlpe.length) {
+      var h = $('#messagecontent').length ?
+        $('#messagecontent').height() - 16 :
+        $(window).height() - mvlpe.offset().top - 10;
+      mvlpe.height(h);
     }
   }
 
@@ -1015,6 +1027,10 @@ function rcube_mail_ui()
       $dialog.dialog('close');
       return;
     }
+
+    // do nothing if mailvelope editor is active
+    if (rcmail.mailvelope_editor)
+      return;
 
     // add icons to clone file input field
     if (rcmail.env.action == 'compose' && !$dialog.data('extended')) {

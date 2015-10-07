@@ -439,12 +439,26 @@ class password extends rcube_plugin
             break;
 
         case 'sha256-crypt':
-            $crypted = crypt($password, '$5$' . self::random_salt(16));
+            $rounds = (int) $rcmail->config->get('password_crypt_rounds');
+            $prefix = '$5$';
+
+            if ($rounds > 1000) {
+                $prefix .= 'rounds=' . $rounds . '$';
+            }
+
+            $crypted = crypt($password, $prefix . self::random_salt(16));
             $prefix  = '{CRYPT}';
             break;
 
         case 'sha512-crypt':
-            $crypted = crypt($password, '$6$' . self::random_salt(16));
+            $rounds = (int) $rcmail->config->get('password_crypt_rounds');
+            $prefix = '$6$';
+
+            if ($rounds > 1000) {
+                $prefix .= 'rounds=' . $rounds . '$';
+            }
+
+            $crypted = crypt($password, $prefix . self::random_salt(16));
             $prefix  = '{CRYPT}';
             break;
 

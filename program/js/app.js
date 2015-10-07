@@ -156,8 +156,8 @@ function rcube_webmail()
     var n;
     this.task = this.env.task;
 
-    // check browser
-    if (this.env.server_error != 409 && (!bw.dom || !bw.xmlhttp_test() || (bw.mz && bw.vendver < 1.9) || (bw.ie && bw.vendver < 7))) {
+    // check browser capabilities (never use version checks here)
+    if (this.env.server_error != 409 && (!bw.dom || !bw.xmlhttp_test())) {
       this.goto_url('error', '_code=0x199');
       return;
     }
@@ -325,7 +325,9 @@ function rcube_webmail()
         else if (this.env.action == 'get')
           this.enable_command('download', 'print', true);
         // show printing dialog
-        else if (this.env.action == 'print' && this.env.uid) {
+        else if (this.env.action == 'print' && this.env.uid
+          && !this.env.is_pgp_content && !this.env.pgp_mime_part
+        ) {
           this.print_dialog();
         }
 
@@ -375,6 +377,8 @@ function rcube_webmail()
           }
           this.http_post(postact, postdata);
         }
+
+        this.check_mailvelope(this.env.action);
 
         // detect browser capabilities
         if (!this.is_framed() && !this.env.extwin)
@@ -510,8 +514,11 @@ function rcube_webmail()
         break;
 
       case 'login':
-        var input_user = $('#rcmloginuser');
-        input_user.bind('keyup', function(e){ return ref.login_user_keyup(e); });
+        var tz, tz_name, jstz = window.jstz,
+            input_user = $('#rcmloginuser'),
+            input_tz = $('#rcmlogintz');
+
+        input_user.bind('keyup', function(e) { return ref.login_user_keyup(e); });
 
         if (input_user.val() == '')
           input_user.focus();
@@ -519,14 +526,10 @@ function rcube_webmail()
           $('#rcmloginpwd').focus();
 
         // detect client timezone
-        if (window.jstz) {
-          var timezone = jstz.determine();
-          if (timezone.name())
-            $('#rcmlogintz').val(timezone.name());
-        }
-        else {
-          $('#rcmlogintz').val(new Date().getStdTimezoneOffset() / -60);
-        }
+        if (jstz && (tz = jstz.determine()))
+          tz_name = tz.name();
+
+        input_tz.val(tz_name ? tz_name : (new Date().getStdTimezoneOffset() / -60));
 
         // display 'loading' message on form submit, lock submit button
         $('form').submit(function () {
@@ -2175,10 +2178,16 @@ function rcube_webmail()
 
   this.set_list_sorting = function(sort_col, sort_order)
   {
+    var sort_old = this.env.sort_col == 'arrival' ? 'date' : this.env.sort_col,
+      sort_new = sort_col == 'arrival' ? 'date' : sort_col;
+
     // set table header class
-    $('#rcm'+this.env.sort_col).removeClass('sorted'+(this.env.sort_order.toUpperCase()));
-    if (sort_col)
-      $('#rcm'+sort_col).addClass('sorted'+sort_order);
+    $('#rcm' + sort_old).removeClass('sorted' + this.env.sort_order.toUpperCase());
+    if (sort_new)
+      $('#rcm' + sort_new).addClass('sorted' + sort_order);
+
+    // if sorting by 'arrival' is selected, click on date column should not switch to 'date'
+    $('#rcmdate > a').prop('rel', sort_col == 'arrival' ? 'arrival' : 'date');
 
     this.env.sort_col = sort_col;
     this.env.sort_order = sort_order;
@@ -3341,6 +3350,473 @@ function rcube_webmail()
     $('input.rcpagejumper').val(this.env.current_page).prop('disabled', this.env.pagecount < 2);
   };
 
+  // check for mailvelope API
+  this.check_mailvelope = function(action)
+  {
+    if (typeof window.mailvelope !== 'undefined') {
+      this.mailvelope_load(action);
+    }
+    else {
+      $(window).on('mailvelope', function() {
+        ref.mailvelope_load(action);
+      });
+    }
+  };
+
+  // Load Mailvelope functionality (and initialize keyring if needed)
+  this.mailvelope_load = function(action)
+  {
+    if (this.env.browser_capabilities)
+      this.env.browser_capabilities['pgpmime'] = 1;
+
+    var keyring = this.env.user_id;
+
+    mailvelope.getKeyring(keyring).then(function(kr) {
+      ref.mailvelope_keyring = kr;
+      ref.mailvelope_init(action, kr);
+    }).catch(function(err) {
+      // attempt to create a new keyring for this app/user
+      mailvelope.createKeyring(keyring).then(function(kr) {
+        ref.mailvelope_keyring = kr;
+        ref.mailvelope_init(action, kr);
+      }).catch(function(err) {
+        console.error(err);
+      });
+    });
+  };
+
+  // Initializes Mailvelope editor or display container
+  this.mailvelope_init = function(action, keyring)
+  {
+    if (!window.mailvelope)
+      return;
+
+    if (action == 'show' || action == 'preview' || action == 'print') {
+      // decrypt text body
+      if (this.env.is_pgp_content) {
+        var data = $(this.env.is_pgp_content).text();
+        ref.mailvelope_display_container(this.env.is_pgp_content, data, keyring);
+      }
+      // load pgp/mime message and pass it to the mailvelope display container
+      else if (this.env.pgp_mime_part) {
+        var msgid = this.display_message(this.get_label('loadingdata'), 'loading'),
+          selector = this.env.pgp_mime_container;
+
+        $.ajax({
+          type: 'GET',
+          url: this.url('get', { '_mbox': this.env.mailbox, '_uid': this.env.uid, '_part': this.env.pgp_mime_part }),
+          error: function(o, status, err) {
+            ref.http_error(o, status, err, msgid);
+          },
+          success: function(data) {
+            ref.mailvelope_display_container(selector, data, keyring, msgid);
+          }
+        });
+      }
+    }
+    else if (action == 'compose') {
+      this.env.compose_commands.push('compose-encrypted');
+      // display the toolbar button
+      $('#' + this.buttons['compose-encrypted'][0].id).show();
+
+      var is_html = $('input[name="_is_html"]').val() > 0;
+
+      if (this.env.pgp_mime_message) {
+        // fetch PGP/Mime part and open load into Mailvelope editor
+        var lock = this.set_busy(true, this.get_label('loadingdata'));
+
+        $.ajax({
+          type: 'GET',
+          url: this.url('get', this.env.pgp_mime_message),
+          error: function(o, status, err) {
+            ref.http_error(o, status, err, lock);
+            ref.enable_command('compose-encrypted', !is_html);
+          },
+          success: function(data) {
+            ref.set_busy(false, null, lock);
+
+            if (is_html) {
+              ref.command('toggle-editor', {html: false, noconvert: true});
+              $('#' + ref.env.composebody).val('');
+            }
+
+            ref.compose_encrypted({ quotedMail: data });
+            ref.enable_command('compose-encrypted', true);
+          }
+        });
+      }
+      else {
+        // enable encrypted compose toggle
+        this.enable_command('compose-encrypted', !is_html);
+      }
+    }
+  };
+
+  // handler for the 'compose-encrypted' command
+  this.compose_encrypted = function(props)
+  {
+    var options, container = $('#' + this.env.composebody).parent();
+
+    // remove Mailvelope editor if active
+    if (ref.mailvelope_editor) {
+      ref.mailvelope_editor = null;
+      ref.compose_skip_unsavedcheck = false;
+      ref.set_button('compose-encrypted', 'act');
+
+      container.removeClass('mailvelope')
+        .find('iframe:not([aria-hidden=true])').remove();
+      $('#' + ref.env.composebody).show();
+      $("[name='_pgpmime']").remove();
+
+      // disable commands that operate on the compose body
+      ref.enable_command('spellcheck', 'insert-sig', 'toggle-editor', 'insert-response', 'save-response', true);
+      ref.triggerEvent('compose-encrypted', { active:false });
+    }
+    // embed Mailvelope editor container
+    else {
+      if (this.spellcheck_state())
+        this.editor.spellcheck_stop();
+
+      if (props.quotedMail) {
+        options = { quotedMail: props.quotedMail, quotedMailIndent: false };
+      }
+      else {
+        options = { predefinedText: $('#' + this.env.composebody).val() };
+      }
+
+      if (this.env.compose_mode == 'reply') {
+        options.quotedMailIndent = true;
+        options.quotedMailHeader = this.env.compose_reply_header;
+      }
+
+      mailvelope.createEditorContainer('#' + container.attr('id'), ref.mailvelope_keyring, options).then(function(editor) {
+        ref.mailvelope_editor = editor;
+        ref.compose_skip_unsavedcheck = true;
+        ref.set_button('compose-encrypted', 'sel');
+
+        container.addClass('mailvelope');
+        $('#' + ref.env.composebody).hide();
+
+        // disable commands that operate on the compose body
+        ref.enable_command('spellcheck', 'insert-sig', 'toggle-editor', 'insert-response', 'save-response', false);
+        ref.triggerEvent('compose-encrypted', { active:true });
+
+        // notify user about loosing attachments
+        if (ref.env.attachments && !$.isEmptyObject(ref.env.attachments)) {
+          alert(ref.get_label('encryptnoattachments'));
+
+          $.each(ref.env.attachments, function(name, attach) {
+            ref.remove_from_attachment_list(name);
+          });
+        }
+      }).catch(function(err) {
+        console.error(err);
+        console.log(options);
+      });
+    }
+  };
+
+  // callback to replace the message body with the full armored
+  this.mailvelope_submit_messageform = function(draft, saveonly)
+  {
+    // get recipients
+    var recipients = [];
+    $.each(['to', 'cc', 'bcc'], function(i,field) {
+      var pos, rcpt, val = $.trim($('[name="_' + field + '"]').val());
+      while (val.length && rcube_check_email(val, true)) {
+        rcpt = RegExp.$2;
+        recipients.push(rcpt);
+        val = val.substr(val.indexOf(rcpt) + rcpt.length + 1).replace(/^\s*,\s*/, '');
+      }
+    });
+
+    // check if we have keys for all recipients
+    var isvalid = recipients.length > 0;
+    ref.mailvelope_keyring.validKeyForAddress(recipients).then(function(status) {
+      var missing_keys = [];
+      $.each(status, function(k,v) {
+        if (v === false) {
+          isvalid = false;
+          missing_keys.push(k);
+        }
+      });
+
+      // list recipients with missing keys
+      if (!isvalid && missing_keys.length) {
+        // load publickey.js
+        if (!$('script#publickeyjs').length) {
+          $('<script>')
+            .attr('id', 'publickeyjs')
+            .attr('src', ref.assets_path('program/js/publickey.js'))
+            .appendTo(document.body);
+        }
+
+        // display dialog with missing keys
+        ref.show_popup_dialog(
+          ref.get_label('nopubkeyfor').replace('$email', missing_keys.join(', ')) +
+          '<p>' + ref.get_label('searchpubkeyservers') + '</p>',
+          ref.get_label('encryptedsendialog'),
+          [{
+            text: ref.get_label('search'),
+            'class': 'mainaction',
+            click: function() {
+              var $dialog = $(this);
+              ref.mailvelope_search_pubkeys(missing_keys, function() {
+                $dialog.dialog('close')
+              });
+            }
+          },
+          {
+            text: ref.get_label('cancel'),
+            click: function(){
+              $(this).dialog('close');
+            }
+          }]
+        );
+        return false;
+      }
+
+      if (!isvalid) {
+        if (!recipients.length) {
+          alert(ref.get_label('norecipientwarning'));
+          $("[name='_to']").focus();
+        }
+        return false;
+      }
+
+      // add sender identity to recipients to be able to decrypt our very own message
+      var senders = [], selected_sender = ref.env.identities[$("[name='_from'] option:selected").val()];
+      $.each(ref.env.identities, function(k, sender) {
+        senders.push(sender.email);
+      });
+
+      ref.mailvelope_keyring.validKeyForAddress(senders).then(function(status) {
+        valid_sender = null;
+        $.each(status, function(k,v) {
+          if (v !== false) {
+            valid_sender = k;
+            if (valid_sender == selected_sender) {
+              return false;  // break
+            }
+          }
+        });
+
+        if (!valid_sender) {
+          if (!confirm(ref.get_label('nopubkeyforsender'))) {
+            return false;
+          }
+        }
+
+        recipients.push(valid_sender);
+
+        ref.mailvelope_editor.encrypt(recipients).then(function(armored) {
+          // all checks passed, send message
+          var form = ref.gui_objects.messageform,
+            hidden = $("[name='_pgpmime']", form),
+            msgid = ref.set_busy(true, draft || saveonly ? 'savingmessage' : 'sendingmessage')
+
+          form.target = 'savetarget';
+          form._draft.value = draft ? '1' : '';
+          form.action = ref.add_url(form.action, '_unlock', msgid);
+          form.action = ref.add_url(form.action, '_framed', 1);
+
+          if (saveonly) {
+            form.action = ref.add_url(form.action, '_saveonly', 1);
+          }
+
+          // send pgp conent via hidden field
+          if (!hidden.length) {
+            hidden = $('<input type="hidden" name="_pgpmime">').appendTo(form);
+          }
+          hidden.val(armored);
+
+          form.submit();
+
+        }).catch(function(err) {
+          console.log(err);
+        });  // mailvelope_editor.encrypt()
+
+      }).catch(function(err) {
+        console.error(err);
+      });  // mailvelope_keyring.validKeyForAddress(senders)
+
+    }).catch(function(err) {
+      console.error(err);
+    });  // mailvelope_keyring.validKeyForAddress(recipients)
+
+    return false;
+  };
+
+  // wrapper for the mailvelope.createDisplayContainer API call
+  this.mailvelope_display_container = function(selector, data, keyring, msgid)
+  {
+    mailvelope.createDisplayContainer(selector, data, keyring, { showExternalContent: this.env.safemode }).then(function() {
+      $(selector).addClass('mailvelope').children().not('iframe').hide();
+      ref.hide_message(msgid);
+      setTimeout(function() { $(window).resize(); }, 10);
+    }).catch(function(err) {
+      console.error(err);
+      ref.hide_message(msgid);
+      ref.display_message('Message decryption failed: ' + err.message, 'error')
+    });
+  };
+
+  // subroutine to query keyservers for public keys
+  this.mailvelope_search_pubkeys = function(emails, resolve)
+  {
+    // query with publickey.js
+    var deferreds = [],
+      pk = new PublicKey(),
+      lock = ref.display_message(ref.get_label('loading'), 'loading');
+
+    $.each(emails, function(i, email) {
+      var d = $.Deferred();
+      pk.search(email, function(results, errorCode) {
+        if (errorCode !== null) {
+          // rejecting would make all fail
+          // d.reject(email);
+          d.resolve([email]);
+        }
+        else {
+          d.resolve([email].concat(results));
+        }
+      });
+      deferreds.push(d);
+    });
+
+    $.when.apply($, deferreds).then(function() {
+      var missing_keys = [],
+        key_selection = [];
+
+      // alanyze results of all queries
+      $.each(arguments, function(i, result) {
+        var email = result.shift();
+        if (!result.length) {
+          missing_keys.push(email);
+        }
+        else {
+          key_selection = key_selection.concat(result);
+        }
+      });
+
+      ref.hide_message(lock);
+      resolve(true);
+
+      // show key import dialog
+      if (key_selection.length) {
+        ref.mailvelope_key_import_dialog(key_selection);
+      }
+      // some keys could not be found
+      if (missing_keys.length) {
+        ref.display_message(ref.get_label('nopubkeyfor').replace('$email', missing_keys.join(', ')), 'warning');
+      }
+    }, function() {
+      console.error('Pubkey lookup failed with', arguments);
+      ref.hide_message(lock);
+      ref.display_message('pubkeysearcherror', 'error');
+      resolve(false);
+    });
+  };
+
+  // list the given public keys in a dialog with options to import
+  // them into the local Maivelope keyring
+  this.mailvelope_key_import_dialog = function(candidates)
+  {
+    var ul = $('<div>').addClass('listing mailvelopekeyimport');
+    $.each(candidates, function(i, keyrec) {
+      var li = $('<div>').addClass('key');
+      if (keyrec.revoked)  li.addClass('revoked');
+      if (keyrec.disabled) li.addClass('disabled');
+      if (keyrec.expired)  li.addClass('expired');
+
+      li.append($('<label>').addClass('keyid').text(ref.get_label('keyid')));
+      li.append($('<a>').text(keyrec.keyid.substr(-8).toUpperCase())
+        .attr('href', keyrec.info)
+        .attr('target', '_blank')
+        .attr('tabindex', '-1'));
+
+      li.append($('<label>').addClass('keylen').text(ref.get_label('keylength')));
+      li.append($('<span>').text(keyrec.keylen));
+
+      if (keyrec.expirationdate) {
+        li.append($('<label>').addClass('keyexpired').text(ref.get_label('keyexpired')));
+        li.append($('<span>').text(new Date(keyrec.expirationdate * 1000).toDateString()));
+      }
+
+      if (keyrec.revoked) {
+        li.append($('<span>').addClass('keyrevoked').text(ref.get_label('keyrevoked')));
+      }
+
+      var ul_ = $('<ul>').addClass('uids');
+      $.each(keyrec.uids, function(j, uid) {
+        var li_ = $('<li>').addClass('uid');
+        if (uid.revoked)  li_.addClass('revoked');
+        if (uid.disabled) li_.addClass('disabled');
+        if (uid.expired)  li_.addClass('expired');
+
+        ul_.append(li_.text(uid.uid));
+      });
+
+      li.append(ul_);
+      li.append($('<input>')
+        .attr('type', 'button')
+        .attr('rel', keyrec.keyid)
+        .attr('value', ref.get_label('import'))
+        .addClass('button importkey')
+        .prop('disabled', keyrec.revoked || keyrec.disabled || keyrec.expired));
+
+      ul.append(li);
+    });
+
+    // display dialog with missing keys
+    ref.show_popup_dialog(
+      $('<div>')
+        .append($('<p>').html(ref.get_label('encryptpubkeysfound')))
+        .append(ul),
+      ref.get_label('importpubkeys'),
+      [{
+        text: ref.get_label('close'),
+        click: function(){
+          $(this).dialog('close');
+        }
+      }]
+    );
+
+    // delegate handler for import button clicks
+    ul.on('click', 'input.button.importkey', function() {
+      var btn = $(this),
+        keyid = btn.attr('rel'),
+        pk = new PublicKey(),
+        lock = ref.display_message(ref.get_label('loading'), 'loading');
+
+        // fetch from keyserver and import to Mailvelope keyring
+        pk.get(keyid, function(armored, errorCode) {
+          ref.hide_message(lock);
+
+          if (errorCode) {
+            ref.display_message(ref.get_label('keyservererror'), 'error');
+            return;
+          }
+
+          // import to keyring
+          ref.mailvelope_keyring.importPublicKey(armored).then(function(status) {
+            if (status === 'REJECTED') {
+              // alert(ref.get_label('Key import was rejected'));
+            }
+            else {
+              var $key = keyid.substr(-8).toUpperCase();
+              btn.closest('.key').fadeOut();
+              ref.display_message(ref.get_label('keyimportsuccess').replace('$key', $key), 'confirmation');
+            }
+          }).catch(function(err) {
+            console.log(err);
+          });
+        });
+    });
+
+  };
+
+
   /*********************************************************/
   /*********       mailbox folders methods         *********/
   /*********************************************************/
@@ -3612,6 +4088,11 @@ function rcube_webmail()
       );
     }
 
+    // delegate sending to Mailvelope routine
+    if (this.mailvelope_editor) {
+      return this.mailvelope_submit_messageform(draft, saveonly);
+    }
+
     // all checks passed, send message
     var msgid = this.set_busy(true, draft || saveonly ? 'savingmessage' : 'sendingmessage'),
       lang = this.spellcheck_lang(),
@@ -3681,7 +4162,7 @@ function rcube_webmail()
       var oldval = input.val(), rx = new RegExp(RegExp.escape(delim) + '\\s*$');
       if (oldval && !rx.test(oldval))
         oldval += delim + ' ';
-      input.val(oldval + recipients.join(delim + ' ') + delim + ' ');
+      input.val(oldval + recipients.join(delim + ' ') + delim + ' ').change();
       this.triggerEvent('add-recipient', { field:field, recipients:recipients });
     }
 
@@ -3785,6 +4266,8 @@ function rcube_webmail()
     if (result) {
       // update internal format flag
       $("input[name='_is_html']").val(props.html ? 1 : 0);
+      // enable encrypted compose toggle
+      this.enable_command('compose-encrypted', !props.html);
     }
 
     return result;
@@ -3929,7 +4412,7 @@ function rcube_webmail()
 
       // reset history of hidden iframe used for saving draft (#1489643)
       // but don't do this on timer-triggered draft-autosaving (#1489789)
-      if (window.frames['savetarget'] && window.frames['savetarget'].history && !this.draft_autosave_submit) {
+      if (window.frames['savetarget'] && window.frames['savetarget'].history && !this.draft_autosave_submit && !this.mailvelope_editor) {
         window.frames['savetarget'].history.back();
       }
 
@@ -3998,6 +4481,11 @@ function rcube_webmail()
     if (this.env.attachments)
       for (id in this.env.attachments)
         str += id;
+
+    // we can't detect changes in the Mailvelope editor so assume it changed
+    if (this.mailvelope_editor) {
+      str += ';' + new Date().getTime();
+    }
 
     if (save)
       this.cmp_hash = str;
@@ -7916,7 +8404,8 @@ function rcube_webmail()
     var submit_data = function() {
       var multiple = files.length > 1,
         ts = new Date().getTime(),
-        content = '<span>' + (multiple ? ref.get_label('uploadingmany') : files[0].name) + '</span>';
+        // jQuery way to escape filename (#1490530)
+        content = $('<span>').text(multiple ? ref.get_label('uploadingmany') : files[0].name).html();
 
       // add to attachments list
       if (!ref.add2attachment_list(ts, { name:'', html:content, classname:'uploading', complete:false }))

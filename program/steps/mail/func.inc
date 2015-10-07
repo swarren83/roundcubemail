@@ -453,6 +453,8 @@ function rcmail_js_message_list($a_headers, $insert_top=false, $a_show_cols=null
         }
     }
 
+    $sort_col = $_SESSION['sort_col'];
+
     // loop through message headers
     foreach ($a_headers as $header) {
         if (empty($header))
@@ -483,7 +485,7 @@ function rcmail_js_message_list($a_headers, $insert_top=false, $a_show_cols=null
             else if ($col == 'size')
                 $cont = $RCMAIL->show_bytes($header->$col);
             else if ($col == 'date')
-                $cont = $RCMAIL->format_date($header->date);
+                $cont = $RCMAIL->format_date($sort_col == 'arrival' ? $header->internaldate : $header->date);
             else if ($col == 'folder') {
                 if ($last_folder !== $header->folder) {
                     $last_folder      = $header->folder;
@@ -588,8 +590,9 @@ function rcmail_message_list_head($attrib, $a_show_cols)
     }
 
     foreach ($a_show_cols as $col) {
-        $label = '';
+        $label    = '';
         $sortable = false;
+        $rel_col  = $col == 'date' && $sort_col == 'arrival' ? 'arrival' : $col;
 
         // get column name
         switch ($col) {
@@ -607,11 +610,11 @@ function rcmail_message_list_head($attrib, $a_show_cols)
             $col_name = $list_menu;
             break;
         case 'fromto':
-            $label = $RCMAIL->gettext($smart_col);
+            $label    = $RCMAIL->gettext($smart_col);
             $col_name = rcube::Q($label);
             break;
         default:
-            $label = $RCMAIL->gettext($col);
+            $label    = $RCMAIL->gettext($col);
             $col_name = rcube::Q($label);
         }
 
@@ -621,7 +624,7 @@ function rcmail_message_list_head($attrib, $a_show_cols)
             $col_name = html::a(array(
                     'href'  => "./#sort",
                     'class' => 'sortcol',
-                    'rel'   => $col,
+                    'rel'   => $rel_col,
                     'title' => $RCMAIL->gettext('sortby')
                 ), $col_name);
         }
@@ -629,7 +632,7 @@ function rcmail_message_list_head($attrib, $a_show_cols)
             $col_name = '<span class="' . $col .'">' . $col_name . '</span>';
         }
 
-        $sort_class = $col == $sort_col && !$disabled_order ? " sorted$sort_order" : '';
+        $sort_class = $rel_col == $sort_col && !$disabled_order ? " sorted$sort_order" : '';
         $class_name = $col.$sort_class;
 
         // put it all together
@@ -770,7 +773,7 @@ function rcmail_check_safe(&$message)
             // get default addressbook, like in addcontact.inc
             $CONTACTS = $RCMAIL->get_address_book(-1, true);
 
-            if ($CONTACTS) {
+            if ($CONTACTS && $message->sender['mailto']) {
                 $result = $CONTACTS->search('email', $message->sender['mailto'], 1, false);
                 if ($result->count) {
                     $message->set_safe(true);
@@ -884,8 +887,7 @@ function rcmail_print_body($body, $part, $p = array())
             $data['body'] = rcube_enriched::to_html($data['body']);
         }
 
-        $txt  = new rcube_html2text($data['body'], false, true);
-        $body = $txt->get_text();
+        $body = $RCMAIL->html2text($data['body']);
         $part->ctype_secondary = 'plain';
     }
     // text/html
@@ -1191,7 +1193,16 @@ function rcmail_message_body($attrib)
                 // unsupported (e.g. encrypted)
                 if ($part->realtype) {
                     if ($part->realtype == 'multipart/encrypted' || $part->realtype == 'application/pkcs7-mime') {
-                        $out .= html::span('part-notice', $RCMAIL->gettext('encryptedmessage'));
+                        if (!empty($_SESSION['browser_caps']['pgpmime']) && ($pgp_mime_part = $MESSAGE->get_multipart_encrypted_part())) {
+                            $out .= html::span('part-notice', $RCMAIL->gettext('externalmessagedecryption'));
+                            $OUTPUT->set_env('pgp_mime_part', $pgp_mime_part->mime_id);
+                            $OUTPUT->set_env('pgp_mime_container', '#' . $attrib['id']);
+                            $OUTPUT->add_label('loadingdata');
+                        }
+
+                        if (!$MESSAGE->encrypted_part) {
+                            $out .= html::span('part-notice', $RCMAIL->gettext('encryptedmessage'));
+                        }
                     }
                     continue;
                 }
@@ -1225,6 +1236,11 @@ function rcmail_message_body($attrib)
                     rcmail_message_error($MESSAGE->uid);
                 }
 
+                // check if the message body is PGP encrypted
+                if (strpos($body, '-----BEGIN PGP MESSAGE-----') !== false) {
+                    $OUTPUT->set_env('is_pgp_content', '#message-part' . ($part_no + 1));
+                }
+
                 $plugin = $RCMAIL->plugins->exec_hook('message_body_prefix',
                     array('part' => $part, 'prefix' => ''));
 
@@ -1245,8 +1261,11 @@ function rcmail_message_body($attrib)
 
                     $out .= html::div($div_attr, $plugin['prefix'] . $body);
                 }
-                else
-                    $out .= html::div('message-part', $plugin['prefix'] . $body);
+                else {
+                    $container_id = 'message-part' . (++$part_no);
+                    $div_attr     = array('class' => 'message-part', 'id' => $container_id);
+                    $out .= html::div($div_attr, $plugin['prefix'] . $body);
+                }
             }
         }
     }
@@ -1798,6 +1817,7 @@ function rcmail_send_mdn($message, &$smtp_error)
             'Message-ID' => $RCMAIL->gen_message_id(),
             'X-Sender'   => $identity['email'],
             'References' => trim($message->headers->references . ' ' . $message->headers->messageID),
+            'In-Reply-To' => $message->headers->messageID,
         );
 
         $report = "Final-Recipient: rfc822; {$identity['email']}\r\n"
@@ -1813,20 +1833,21 @@ function rcmail_send_mdn($message, &$smtp_error)
             $report .= "Reporting-UA: $agent\r\n";
         }
 
+        $to   = rcube_mime::decode_mime_string($message->headers->to, $message->headers->charset);
+        $date = $RCMAIL->format_date($message->headers->date, $RCMAIL->config->get('date_long'));
         $body = $RCMAIL->gettext("yourmessage") . "\r\n\r\n" .
-            "\t" . $RCMAIL->gettext("to") . ': ' . rcube_mime::decode_mime_string($message->headers->to, $message->headers->charset) . "\r\n" .
-            "\t" . $RCMAIL->gettext("subject") . ': ' . $message->subject . "\r\n" .
-            "\t" . $RCMAIL->gettext("date") . ': ' . $RCMAIL->format_date($message->headers->date, $RCMAIL->config->get('date_long')) . "\r\n" .
+            "\t" . $RCMAIL->gettext("to") . ": {$to}\r\n" .
+            "\t" . $RCMAIL->gettext("subject") . ": {$message->subject}\r\n" .
+            "\t" . $RCMAIL->gettext("date") . ": {$date}\r\n" .
             "\r\n" . $RCMAIL->gettext("receiptnote");
 
-        $compose->headers($headers);
+        $compose->headers(array_filter($headers));
         $compose->setContentType('multipart/report', array('report-type'=> 'disposition-notification'));
         $compose->setTXTBody(rcube_mime::wordwrap($body, 75, "\r\n"));
         $compose->addAttachment($report, 'message/disposition-notification', 'MDNPart2.txt', false, '7bit', 'inline');
 
-        if ($RCMAIL->config->get('mdn_use_from')) {
-            $options['mdn_use_from'] = true;
-        }
+        // SMTP options
+        $options = array('mdn_use_from' => (bool) $RCMAIL->config->get('mdn_use_from'));
 
         $sent = $RCMAIL->deliver_message($compose, $identity['email'], $mailto, $smtp_error, $body_file, $options);
 

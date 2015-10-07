@@ -62,8 +62,6 @@ class rcube_imap extends rcube_storage
     protected $sort_field = '';
     protected $sort_order = 'DESC';
     protected $struct_charset;
-    protected $uid_id_map = array();
-    protected $msg_headers = array();
     protected $search_set;
     protected $search_string = '';
     protected $search_charset = '';
@@ -81,7 +79,7 @@ class rcube_imap extends rcube_storage
      */
     public function __construct()
     {
-        $this->conn = new rcube_imap_generic();
+        $this->conn    = new rcube_imap_generic();
         $this->plugins = rcube::get_instance()->plugins;
 
         // Set namespace and delimiter from session,
@@ -469,7 +467,7 @@ class rcube_imap extends rcube_storage
             return;
         }
 
-        $config = rcube::get_instance()->config;
+        $config         = rcube::get_instance()->config;
         $imap_personal  = $config->get('imap_ns_personal');
         $imap_other     = $config->get('imap_ns_other');
         $imap_shared    = $config->get('imap_ns_shared');
@@ -538,6 +536,52 @@ class rcube_imap extends rcube_storage
 
         $_SESSION['imap_namespace'] = $this->namespace;
         $_SESSION['imap_delimiter'] = $this->delimiter;
+    }
+
+    /**
+     * Returns IMAP server vendor name
+     *
+     * @return string Vendor name
+     * @since 1.2
+     */
+    public function get_vendor()
+    {
+        if ($_SESSION['imap_vendor'] !== null) {
+            return $_SESSION['imap_vendor'];
+        }
+
+        $config      = rcube::get_instance()->config;
+        $imap_vendor = $config->get('imap_vendor');
+
+        if ($imap_vendor) {
+            return $imap_vendor;
+        }
+
+        if (!$this->check_connection()) {
+            return;
+        }
+
+        if (($ident = $this->conn->data['ID']) === null) {
+            $ident = $this->conn->id(array(
+                    'name'    => 'Roundcube',
+                    'version' => RCUBE_VERSION,
+                    'php'     => PHP_VERSION,
+                    'os'      => PHP_OS,
+            ));
+        }
+
+        $vendor  = (string) (!empty($ident) ? $ident['name'] : '');
+        $ident   = strtolower($vendor . ' ' . $this->conn->data['GREETING']);
+        $vendors = array('cyrus', 'dovecot', 'uw-imap', 'gmail', 'hmail');
+
+        foreach ($vendors as $v) {
+            if (strpos($ident, $v) !== false) {
+                $vendor = $v;
+                break;
+            }
+        }
+
+        return $_SESSION['imap_vendor'] = $vendor;
     }
 
     /**
@@ -938,7 +982,7 @@ class rcube_imap extends rcube_storage
 
         // gather messages from a multi-folder search
         if ($this->search_set->multi) {
-            $page_size = $this->page_size;
+            $page_size  = $this->page_size;
             $sort_field = $this->sort_field;
             $search_set = $this->search_set;
 
@@ -949,23 +993,26 @@ class rcube_imap extends rcube_storage
             $slice_length = min($page_size, $cnt - $from);
 
             // fetch resultset headers, sort and slice them
-            if (!empty($sort_field)) {
+            if (!empty($sort_field) && $search_set->get_parameters('SORT') != $sort_field) {
                 $this->sort_field = null;
-                $this->page_size = 1000;  // fetch up to 1000 matching messages per folder
-                $this->threading = false;
+                $this->page_size  = 1000;  // fetch up to 1000 matching messages per folder
+                $this->threading  = false;
 
                 $a_msg_headers = array();
                 foreach ($search_set->sets as $resultset) {
                     if (!$resultset->is_empty()) {
-                        $this->search_set = $resultset;
+                        $this->search_set     = $resultset;
                         $this->search_threads = $resultset instanceof rcube_result_thread;
-                        $a_msg_headers = array_merge($a_msg_headers, $this->list_search_messages($resultset->get_parameters('MAILBOX'), 1));
+
+                        $a_headers     =  $this->list_search_messages($resultset->get_parameters('MAILBOX'), 1);
+                        $a_msg_headers = array_merge($a_msg_headers, $a_headers);
+                        unset($a_headers);
                     }
                 }
 
                 // sort headers
                 if (!empty($a_msg_headers)) {
-                    $a_msg_headers = $this->conn->sortHeaders($a_msg_headers, $sort_field, $this->sort_order);
+                    $a_msg_headers = rcube_imap_generic::sortHeaders($a_msg_headers, $sort_field, $this->sort_order);
                 }
 
                 // store (sorted) message index
@@ -999,7 +1046,7 @@ class rcube_imap extends rcube_storage
 
             // restore members
             $this->sort_field = $sort_field;
-            $this->page_size = $page_size;
+            $this->page_size  = $page_size;
             $this->search_set = $search_set;
 
             return $a_msg_headers;
@@ -1093,12 +1140,8 @@ class rcube_imap extends rcube_storage
                 return array();
             }
 
-            if (!$this->check_connection()) {
-                return array();
-            }
-
             // if not already sorted
-            $a_msg_headers = $this->conn->sortHeaders(
+            $a_msg_headers = rcube_imap_generic::sortHeaders(
                 $a_msg_headers, $this->sort_field, $this->sort_order);
 
             // only return the requested part of the set
@@ -2381,7 +2424,7 @@ class rcube_imap extends rcube_storage
      *
      * @param mixed   $uids       Message UIDs as array or comma-separated string, or '*'
      * @param string  $flag       Flag to set: SEEN, UNDELETED, DELETED, RECENT, ANSWERED, DRAFT, MDNSENT
-     * @param string  $folder    Folder name
+     * @param string  $folder     Folder name
      * @param boolean $skip_cache True to skip message cache clean up
      *
      * @return boolean  Operation status
@@ -2637,7 +2680,6 @@ class rcube_imap extends rcube_storage
             // really deleted from the folder
             $this->expunge_message($uids, $folder, false);
             $this->clear_messagecount($folder);
-            unset($this->uid_id_map[$folder]);
 
             // unset threads internal cache
             unset($this->icache['threads']);
@@ -2806,42 +2848,47 @@ class rcube_imap extends rcube_storage
         $list_extended = !$config->get('imap_force_lsub') && $this->get_capability('LIST-EXTENDED');
         if ($list_extended) {
             // This will also set folder options, LSUB doesn't do that
-            $a_folders = $this->conn->listMailboxes($root, $name,
+            $result = $this->conn->listMailboxes($root, $name,
                 NULL, array('SUBSCRIBED'));
         }
         else {
             // retrieve list of folders from IMAP server using LSUB
-            $a_folders = $this->conn->listSubscribed($root, $name);
+            $result = $this->conn->listSubscribed($root, $name);
         }
 
-        if (!is_array($a_folders)) {
+        if (!is_array($result)) {
             return array();
         }
 
         // #1486796: some server configurations doesn't return folders in all namespaces
         if ($root == '' && $name == '*' && $config->get('imap_force_ns')) {
-            $this->list_folders_update($a_folders, ($list_extended ? 'ext-' : '') . 'subscribed');
+            $this->list_folders_update($result, ($list_extended ? 'ext-' : '') . 'subscribed');
+        }
+
+        // Remove hidden folders
+        if ($config->get('imap_skip_hidden_folders')) {
+            $result = array_filter($result, function($v) { return $v[0] != '.'; });
         }
 
         if ($list_extended) {
             // unsubscribe non-existent folders, remove from the list
-            if (is_array($a_folders) && $name == '*' && !empty($this->conn->data['LIST'])) {
-                foreach ($a_folders as $idx => $folder) {
+            if ($name == '*' && !empty($this->conn->data['LIST'])) {
+                foreach ($result as $idx => $folder) {
                     if (($opts = $this->conn->data['LIST'][$folder])
                         && in_array_nocase('\\NonExistent', $opts)
                     ) {
                         $this->conn->unsubscribe($folder);
-                        unset($a_folders[$idx]);
+                        unset($result[$idx]);
                     }
                 }
             }
         }
         else {
             // unsubscribe non-existent folders, remove them from the list
-            if (is_array($a_folders) && !empty($a_folders) && $name == '*') {
+            if (!empty($result) && $name == '*') {
                 $existing    = $this->list_folders($root, $name);
-                $nonexisting = array_diff($a_folders, $existing);
-                $a_folders   = array_diff($a_folders, $nonexisting);
+                $nonexisting = array_diff($result, $existing);
+                $result      = array_diff($result, $nonexisting);
 
                 foreach ($nonexisting as $folder) {
                     $this->conn->unsubscribe($folder);
@@ -2849,7 +2896,7 @@ class rcube_imap extends rcube_storage
             }
         }
 
-        return $a_folders;
+        return $result;
     }
 
     /**
@@ -2946,6 +2993,11 @@ class rcube_imap extends rcube_storage
         // #1486796: some server configurations doesn't return folders in all namespaces
         if ($root == '' && $name == '*' && $config->get('imap_force_ns')) {
             $this->list_folders_update($result);
+        }
+
+        // Remove hidden folders
+        if ($config->get('imap_skip_hidden_folders')) {
+            $result = array_filter($result, function($v) { return $v[0] != '.'; });
         }
 
         return $result;
@@ -3056,8 +3108,22 @@ class rcube_imap extends rcube_storage
      */
     public function folder_size($folder)
     {
+        if (!strlen($folder)) {
+            return false;
+        }
+
         if (!$this->check_connection()) {
             return 0;
+        }
+
+        // On Cyrus we can use special folder annotation, which should be much faster
+        if ($this->get_vendor() == 'cyrus') {
+            $idx    = '/shared/vendor/cmu/cyrus-imapd/size';
+            $result = $this->get_metadata($folder, $idx, array(), true);
+
+            if (!empty($result) && is_numeric($result[$folder][$idx])) {
+                return $result[$folder][$idx];
+            }
         }
 
         // @TODO: could we try to use QUOTA here?
@@ -3823,30 +3889,33 @@ class rcube_imap extends rcube_storage
     /**
      * Returns IMAP metadata/annotations (GETMETADATA/GETANNOTATION)
      *
-     * @param string $folder  Folder name (empty for server metadata)
-     * @param array  $entries Entries
-     * @param array  $options Command options (with MAXSIZE and DEPTH keys)
+     * @param string  $folder   Folder name (empty for server metadata)
+     * @param array   $entries  Entries
+     * @param array   $options  Command options (with MAXSIZE and DEPTH keys)
+     * @param bool    $force    Disables cache use
      *
      * @return array Metadata entry-value hash array on success, NULL on error
      * @since 0.5-beta
      */
-    public function get_metadata($folder, $entries, $options=array())
+    public function get_metadata($folder, $entries, $options = array(), $force = false)
     {
-        $entries = (array)$entries;
+        $entries = (array) $entries;
 
-        // create cache key
-        // @TODO: this is the simplest solution, but we do the same with folders list
-        //        maybe we should store data per-entry and merge on request
-        sort($options);
-        sort($entries);
-        $cache_key = 'mailboxes.metadata.' . $folder;
-        $cache_key .= '.' . md5(serialize($options).serialize($entries));
+        if (!$force) {
+            // create cache key
+            // @TODO: this is the simplest solution, but we do the same with folders list
+            //        maybe we should store data per-entry and merge on request
+            sort($options);
+            sort($entries);
+            $cache_key = 'mailboxes.metadata.' . $folder;
+            $cache_key .= '.' . md5(serialize($options).serialize($entries));
 
-        // get cached data
-        $cached_data = $this->get_cache($cache_key);
+            // get cached data
+            $cached_data = $this->get_cache($cache_key);
 
-        if (is_array($cached_data)) {
-            return $cached_data;
+            if (is_array($cached_data)) {
+                return $cached_data;
+            }
         }
 
         if (!$this->check_connection()) {
@@ -3885,11 +3954,12 @@ class rcube_imap extends rcube_storage
         }
 
         if (isset($res)) {
-            $this->update_cache($cache_key, $res);
+            if (!$force) {
+                $this->update_cache($cache_key, $res);
+            }
+
             return $res;
         }
-
-        return null;
     }
 
     /**
@@ -3910,7 +3980,6 @@ class rcube_imap extends rcube_storage
         }
 
         // @TODO: log error
-        return null;
     }
 
 
@@ -4094,13 +4163,11 @@ class rcube_imap extends rcube_storage
         $specials  = array_merge(array('INBOX'), array_values($this->get_special_folders()));
         $folders   = array();
 
-        // convert names to UTF-8 and skip folders starting with '.'
+        // convert names to UTF-8
         foreach ($a_folders as $folder) {
-            if ($folder[0] != '.') {
-                // for better performance skip encoding conversion
-                // if the string does not look like UTF7-IMAP
-                $folders[$folder] = strpos($folder, '&') === false ? $folder : rcube_charset::convert($folder, 'UTF7-IMAP');
-            }
+            // for better performance skip encoding conversion
+            // if the string does not look like UTF7-IMAP
+            $folders[$folder] = strpos($folder, '&') === false ? $folder : rcube_charset::convert($folder, 'UTF7-IMAP');
         }
 
         // sort folders
@@ -4181,19 +4248,11 @@ class rcube_imap extends rcube_storage
             $folder = $this->folder;
         }
 
-        if ($uid = array_search($id, (array)$this->uid_id_map[$folder])) {
-            return $uid;
-        }
-
         if (!$this->check_connection()) {
             return null;
         }
 
-        $uid = $this->conn->ID2UID($folder, $id);
-
-        $this->uid_id_map[$folder][$uid] = $id;
-
-        return $uid;
+        return $this->conn->ID2UID($folder, $id);
     }
 
     /**
@@ -4201,22 +4260,16 @@ class rcube_imap extends rcube_storage
      */
     protected function change_subscription($folders, $mode)
     {
-        $updated = false;
+        $updated = 0;
+        $folders = (array) $folders;
 
         if (!empty($folders)) {
             if (!$this->check_connection()) {
                 return false;
             }
 
-            foreach ((array)$folders as $i => $folder) {
-                $folders[$i] = $folder;
-
-                if ($mode == 'subscribe') {
-                    $updated = $this->conn->subscribe($folder);
-                }
-                else if ($mode == 'unsubscribe') {
-                    $updated = $this->conn->unsubscribe($folder);
-                }
+            foreach ($folders as $folder) {
+                $updated += (int) $this->conn->{$mode}($folder);
             }
         }
 
@@ -4225,7 +4278,7 @@ class rcube_imap extends rcube_storage
             $this->clear_cache('mailboxes', true);
         }
 
-        return $updated;
+        return $updated == count($folders) ? true : false;
     }
 
     /**
@@ -4300,7 +4353,6 @@ class rcube_imap extends rcube_storage
 
     /**
      * This is our own debug handler for the IMAP connection
-     * @access public
      */
     public function debug_handler(&$imap, $message)
     {

@@ -672,9 +672,10 @@ function rcmail_user_prefs($current = null)
                 $select   = new html_select(array('name' => '_htmleditor', 'id' => $field_id));
 
                 $select->add($RCMAIL->gettext('never'), 0);
-                $select->add($RCMAIL->gettext('always'), 1);
                 $select->add($RCMAIL->gettext('htmlonreply'), 2);
                 $select->add($RCMAIL->gettext('htmlonreplyandforward'), 3);
+                $select->add($RCMAIL->gettext('always'), 1);
+                $select->add($RCMAIL->gettext('alwaysbutplain'), 4);
 
                 $blocks['main']['options']['htmleditor'] = array(
                     'title'   => html::label($field_id, rcube::Q($RCMAIL->gettext('htmleditor'))),
@@ -870,6 +871,20 @@ function rcmail_user_prefs($current = null)
                 $blocks['sig']['options']['strip_existing_sig'] = array(
                     'title'   => html::label($field_id, rcube::Q($RCMAIL->gettext('replyremovesignature'))),
                     'content' => $input->show($config['strip_existing_sig']?1:0),
+                );
+            }
+
+            if (!isset($no_override['sig_separator'])) {
+                if (!$current) {
+                    continue 2;
+                }
+
+                $field_id = 'rcmfd_sig_separator';
+                $input    = new html_checkbox(array('name' => '_sig_separator', 'id' => $field_id, 'value' => 1));
+
+                $blocks['sig']['options']['sig_separator'] = array(
+                    'title'   => html::label($field_id, rcube::Q($RCMAIL->gettext('sigseparator'))),
+                    'content' => $input->show($RCMAIL->config->get('sig_separator') ? 1 : 0),
                 );
             }
 

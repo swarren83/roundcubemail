@@ -69,26 +69,27 @@ class rcube_message
      *
      * Provide a uid, and parse message structure.
      *
-     * @param string $uid    The message UID.
-     * @param string $folder Folder name
+     * @param string $uid     The message UID.
+     * @param string $folder  Folder name
+     * @param bool   $is_safe Security flag
      *
      * @see self::$app, self::$storage, self::$opt, self::$parts
      */
-    function __construct($uid, $folder = null)
+    function __construct($uid, $folder = null, $is_safe = false)
     {
         // decode combined UID-folder identifier
         if (preg_match('/^\d+-.+/', $uid)) {
             list($uid, $folder) = explode('-', $uid, 2);
         }
 
-        $this->uid  = $uid;
-        $this->app  = rcube::get_instance();
+        $this->uid     = $uid;
+        $this->app     = rcube::get_instance();
         $this->storage = $this->app->get_storage();
         $this->folder  = strlen($folder) ? $folder : $this->storage->get_folder();
-        $this->storage->set_options(array('all_headers' => true));
 
         // Set current folder
         $this->storage->set_folder($this->folder);
+        $this->storage->set_options(array('all_headers' => true));
 
         $this->headers = $this->storage->get_message($uid);
 
@@ -100,7 +101,7 @@ class rcube_message
         $this->subject = $this->headers->get('subject');
         list(, $this->sender) = each($this->mime->decode_address_list($this->headers->from, 1));
 
-        $this->set_safe((intval($_GET['_safe']) || $_SESSION['safe_messages'][$this->folder.':'.$uid]));
+        $this->set_safe($is_safe || $_SESSION['safe_messages'][$this->folder.':'.$uid]);
         $this->opt = array(
             'safe'        => $this->is_safe,
             'prefer_html' => $this->app->config->get('prefer_html'),
@@ -476,6 +477,28 @@ class rcube_message
                 if (in_array($part, (array)$att_part->parts)) {
                     return true;
                 }
+            }
+        }
+
+        return false;
+    }
+
+    /**
+     * In a multipart/encrypted encrypted message,
+     * find the encrypted message payload part.
+     *
+     * @return rcube_message_part
+     */
+    public function get_multipart_encrypted_part()
+    {
+        foreach ($this->mime_parts as $mime_id => $mpart) {
+            if ($mpart->mimetype == 'multipart/encrypted') {
+                $this->pgp_mime = true;
+            }
+            if ($this->pgp_mime && ($mpart->mimetype == 'application/octet-stream' ||
+                    (!empty($mpart->filename) && $mpart->filename != 'version.txt'))) {
+                $this->encrypted_part = $mime_id;
+                return $mpart;
             }
         }
 

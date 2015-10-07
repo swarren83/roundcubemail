@@ -178,9 +178,11 @@ class rcmail extends rcube
         // set localization
         setlocale(LC_ALL, $lang . '.utf8', $lang . '.UTF-8', 'en_US.utf8', 'en_US.UTF-8');
 
-        // workaround for http://bugs.php.net/bug.php?id=18556
-        if (PHP_VERSION_ID < 50500 && in_array($lang, array('tr_TR', 'ku', 'az_AZ'))) {
-            setlocale(LC_CTYPE, 'en_US.utf8', 'en_US.UTF-8');
+        // Workaround for http://bugs.php.net/bug.php?id=18556
+        // Also strtoupper/strtolower and other methods are locale-aware
+        // for these locales it is problematic (#1490519)
+        if (in_array($lang, array('tr_TR', 'ku', 'az_AZ'))) {
+            setlocale(LC_CTYPE, 'en_US.utf8', 'en_US.UTF-8', 'C');
         }
     }
 
@@ -808,7 +810,7 @@ class rcmail extends rcube
 
             // remove old token from the path
             $base_path = rtrim($base_path, '/');
-            $base_path = preg_replace('/\/[a-f0-9]{' . strlen($token) . '}$/', '', $base_path);
+            $base_path = preg_replace('/\/[a-zA-Z0-9]{' . strlen($token) . '}$/', '', $base_path);
 
             // this need to be full url to make redirects work
             $absolute = true;
@@ -1858,7 +1860,20 @@ class rcmail extends rcube
      */
     public function html_editor($mode = '')
     {
-        $hook = $this->plugins->exec_hook('html_editor', array('mode' => $mode));
+        $spellcheck       = intval($this->config->get('enable_spellcheck'));
+        $spelldict        = intval($this->config->get('spellcheck_dictionary'));
+        $disabled_plugins = array();
+        $disabled_buttons = array();
+
+        if (!$spellcheck) {
+            $disabled_plugins[] = 'spellchecker';
+        }
+
+        $hook = $this->plugins->exec_hook('html_editor', array(
+                'mode'             => $mode,
+                'disabled_plugins' => $disabled_plugins,
+                'disabled_buttons' => $disabled_buttons,
+        ));
 
         if ($hook['abort']) {
             return;
@@ -1885,8 +1900,10 @@ class rcmail extends rcube
             'mode'       => $mode,
             'lang'       => $lang,
             'skin_path'  => $this->output->get_skin_path(),
-            'spellcheck' => intval($this->config->get('enable_spellcheck')),
-            'spelldict'  => intval($this->config->get('spellcheck_dictionary'))
+            'spellcheck' => $spellcheck, // deprecated
+            'spelldict'  => $spelldict,
+            'disabled_plugins' => $hook['disabled_plugins'],
+            'disabled_buttons' => $hook['disabled_buttons'],
         );
 
         $this->output->add_label('selectimage', 'addimage', 'selectmedia', 'addmedia');
@@ -1894,43 +1911,6 @@ class rcmail extends rcube
         $this->output->include_css('program/js/tinymce/roundcube/browser.css');
         $this->output->include_script('tinymce/tinymce.min.js');
         $this->output->include_script('editor.js');
-    }
-
-    /**
-     * Replaces TinyMCE's emoticon images with plain-text representation
-     *
-     * @param string $html  HTML content
-     *
-     * @return string HTML content
-     */
-    public static function replace_emoticons($html)
-    {
-        $emoticons = array(
-            '8-)' => 'smiley-cool',
-            ':-#' => 'smiley-foot-in-mouth',
-            ':-*' => 'smiley-kiss',
-            ':-X' => 'smiley-sealed',
-            ':-P' => 'smiley-tongue-out',
-            ':-@' => 'smiley-yell',
-            ":'(" => 'smiley-cry',
-            ':-(' => 'smiley-frown',
-            ':-D' => 'smiley-laughing',
-            ':-)' => 'smiley-smile',
-            ':-S' => 'smiley-undecided',
-            ':-$' => 'smiley-embarassed',
-            'O:-)' => 'smiley-innocent',
-            ':-|' => 'smiley-money-mouth',
-            ':-O' => 'smiley-surprised',
-            ';-)' => 'smiley-wink',
-        );
-
-        foreach ($emoticons as $idx => $file) {
-            // <img title="Cry" src="http://.../program/js/tinymce/plugins/emoticons/img/smiley-cry.gif" border="0" alt="Cry" />
-            $search[]  = '/<img title="[a-z ]+" src="https?:\/\/[a-z0-9_.\/-]+\/tinymce\/plugins\/emoticons\/img\/'.$file.'.gif"[^>]+\/>/i';
-            $replace[] = $idx;
-        }
-
-        return preg_replace($search, $replace, $html);
     }
 
     /**
@@ -2317,6 +2297,39 @@ class rcmail extends rcube
         }
 
         return file_get_contents($name, false);
+    }
+
+    /**
+     * Converts HTML content into plain text
+     *
+     * @param string $html    HTML content
+     * @param array  $options Conversion parameters (width, links, charset)
+     *
+     * @return string Plain text
+     */
+    public function html2text($html, $options = array())
+    {
+        $default_options = array(
+            'links'   => true,
+            'width'   => 75,
+            'body'    => $html,
+            'charset' => RCUBE_CHARSET,
+        );
+
+        $options = array_merge($default_options, (array) $options);
+
+        // Plugins may want to modify HTML in another/additional way
+        $options = $this->plugins->exec_hook('html2text', $options);
+
+        // Convert to text
+        if (!$options['abort']) {
+            $converter = new rcube_html2text($options['body'],
+                false, $options['links'], $options['width'], $options['charset']);
+
+            $options['body'] = rtrim($converter->get_text());
+        }
+
+        return $options['body'];
     }
 
 

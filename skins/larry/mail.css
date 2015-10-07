@@ -627,7 +627,7 @@ h3.subject {
 
 .headers-table td {
 	color: #666;
-	padding: 2px 8px;
+	padding: 1px 8px;
 }
 
 .headers-table td.header,
@@ -652,7 +652,6 @@ h3.subject {
 
 .headers-table td.subject {
 	color: #333;
-	font-size: 110%;
 	font-weight: bold;
 }
 
@@ -861,19 +860,18 @@ div.hide-headers {
 
 #messagecontent .rightcol,
 #messagepreview .rightcol {
-	float: right;
-/*
 	position: absolute;
-	top: 10px;
-	right: 10px;
-	height: 90%;
-*/
+	right: 8px;
 	width: 230px;
-	margin: 8px;
 	min-height: 200px;
 	background: #f0f0f0;
 	padding: 8px;
 	border-radius: 4px;
+	z-index: 1;
+}
+
+#messagecontent .rightcol {
+	margin-top: 8px;
 }
 
 #messagebody {
@@ -958,12 +956,13 @@ div.message-partheaders .headers-table {
 }
 
 div.message-partheaders .headers-table td.header-title {
-	width: auto;
+	width: 1%;
 	padding-left: 0;
+	vertical-align: top;
 }
 
 div.message-partheaders .headers-table td.header {
-	width: 88%;
+	width: 99%;
 }
 
 #messagebody > hr {
@@ -1298,6 +1297,16 @@ div.message-partheaders .headers-table td.header {
 	bottom: 42px;
 }
 
+#composebodycontainer.mailvelope {
+	right: 0;
+	z-index: 10;
+}
+
+#composebodycontainer.mailvelope > iframe[scrolling='no'] {
+	position: relative;
+	top: -12px;
+}
+
 #composebody {
 	position: absolute;
 	top: 0;
@@ -1383,4 +1392,57 @@ div.message-partheaders .headers-table td.header {
 
 #uploadform form div {
 	margin: 4px 0;
+}
+
+.mailvelopekeyimport div.key {
+	position: relative;
+	margin-bottom: 2px;
+	padding: 1em;
+	background-color: #ebebeb;
+}
+
+.mailvelopekeyimport div.key.revoked,
+.mailvelopekeyimport div.key.disabled {
+	color: #a0a0a0;
+}
+
+.mailvelopekeyimport div.key label {
+	display: inline-block;
+	margin-right: 0.5em;
+}
+
+.mailvelopekeyimport div.key label:after {
+	content: ":";
+}
+
+.mailvelopekeyimport div.key label + a,
+.mailvelopekeyimport div.key label + span {
+	display: inline-block;
+	margin-right: 2em;
+	white-space: nowrap;
+}
+
+.mailvelopekeyimport div.key label + a {
+	font-weight: bold;
+}
+
+.mailvelopekeyimport ul.uids {
+	margin: 1em 0 0 0;
+	padding: 0;
+}
+
+.mailvelopekeyimport li.uid {
+	border: 0;
+	padding: 0.3em;
+}
+
+.mailvelopekeyimport div.key input.button.importkey {
+	position: absolute;
+	top: 0.8em;
+	right: 0.8em;
+	padding: 4px 6px;
+}
+
+.mailvelopekeyimport div.key input.button[disabled] {
+	display: none;
 }

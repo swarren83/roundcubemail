@@ -59,6 +59,10 @@ class enigma_ui
                     $this->key_import();
                     break;
 
+                case 'export':
+                    $this->key_export();
+                    break;
+
                 case 'generate':
                     $this->key_generate();
                     break;
@@ -260,6 +264,7 @@ class enigma_ui
             }
         }
 
+        $this->rc->output->set_env('rowcount', $size);
         $this->rc->output->set_env('search_request', $search);
         $this->rc->output->set_env('pagecount', ceil($listsize/$pagesize));
         $this->rc->output->set_env('current_page', $page);
@@ -352,7 +357,7 @@ class enigma_ui
     function tpl_key_data($attrib)
     {
         $out   = '';
-        $table = new html_table(array('cols' => 2)); 
+        $table = new html_table(array('cols' => 2));
 
         // Key user ID
         $table->add('title', $this->enigma->gettext('keyuserid'));
@@ -380,24 +385,102 @@ class enigma_ui
         $out .= html::tag('fieldset', null,
             html::tag('legend', null,
                 $this->enigma->gettext('basicinfo')) . $table->show($attrib));
-/*
+
         // Subkeys
-        $table = new html_table(array('cols' => 6)); 
-        // Columns: Type, ID, Algorithm, Size, Created, Expires
+        $table = new html_table(array('cols' => 5, 'id' => 'enigmasubkeytable', 'class' => 'records-table'));
+
+        $table->add_header('id', $this->enigma->gettext('subkeyid'));
+        $table->add_header('algo', $this->enigma->gettext('subkeyalgo'));
+        $table->add_header('created', $this->enigma->gettext('subkeycreated'));
+        $table->add_header('expires', $this->enigma->gettext('subkeyexpires'));
+        $table->add_header('usage', $this->enigma->gettext('subkeyusage'));
+
+        $now         = time();
+        $date_format = $this->rc->config->get('date_format', 'Y-m-d');
+        $usage_map   = array(
+            enigma_key::CAN_ENCRYPT => $this->enigma->gettext('typeencrypt'),
+            enigma_key::CAN_SIGN    => $this->enigma->gettext('typesign'),
+            enigma_key::CAN_CERTIFY => $this->enigma->gettext('typecert'),
+            enigma_key::CAN_AUTH    => $this->enigma->gettext('typeauth'),
+        );
+
+        foreach ($this->data->subkeys as $subkey) {
+            $algo = $subkey->get_algorithm();
+            if ($algo && $subkey->length) {
+                $algo .= ' (' . $subkey->length . ')';
+            }
+
+            $usage = array();
+            foreach ($usage_map as $key => $text) {
+                if ($subkey->usage & $key) {
+                    $usage[] = $text;
+                }
+            }
+
+            $table->add('id', $subkey->get_short_id());
+            $table->add('algo', $algo);
+            $table->add('created', $subkey->created ? $this->rc->format_date($subkey->created, $date_format, false) : '');
+            $table->add('expires', $subkey->expires ? $this->rc->format_date($subkey->expires, $date_format, false) : $this->enigma->gettext('expiresnever'));
+            $table->add('usage', implode(',', $usage));
+            $table->set_row_attribs($subkey->revoked || ($subkey->expires && $subkey->expires < $now) ? 'deleted' : '');
+        }
 
         $out .= html::tag('fieldset', null,
-            html::tag('legend', null, 
-                $this->enigma->gettext('subkeys')) . $table->show($attrib));
+            html::tag('legend', null,
+                $this->enigma->gettext('subkeys')) . $table->show());
 
         // Additional user IDs
-        $table = new html_table(array('cols' => 2));
-        // Columns: User ID, Validity
+        $table = new html_table(array('cols' => 2, 'id' => 'enigmausertable', 'class' => 'records-table'));
+
+        $table->add_header('id', $this->enigma->gettext('userid'));
+        $table->add_header('valid', $this->enigma->gettext('uservalid'));
+
+        foreach ($this->data->users as $user) {
+            $username = $user->name;
+            if ($user->comment) {
+                $username .= ' (' . $user->comment . ')';
+            }
+            $username .= ' <' . $user->email . '>';
+
+            $table->add('id', rcube::Q(trim($username)));
+            $table->add('valid', $this->enigma->gettext($user->valid ? 'valid' : 'unknown'));
+            $table->set_row_attribs($user->revoked || !$user->valid ? 'deleted' : '');
+        }
 
         $out .= html::tag('fieldset', null,
-            html::tag('legend', null, 
-                $this->enigma->gettext('userids')) . $table->show($attrib));
-*/
+            html::tag('legend', null,
+                $this->enigma->gettext('userids')) . $table->show());
+
         return $out;
+    }
+
+    /**
+     * Key(s) export handler
+     */
+    private function key_export()
+    {
+        $keys   = rcube_utils::get_input_value('_keys', rcube_utils::INPUT_GPC);
+        $engine = $this->enigma->load_engine();
+        $list   = $keys == '*' ? $engine->list_keys() : explode(',', $keys);
+
+        if (is_array($list)) {
+            $filename = 'export.pgp';
+            if (count($list) == 1) {
+                $filename = (is_object($list[0]) ? $list[0]->id : $list[0]) . '.pgp';
+            }
+
+            // send downlaod headers
+            header('Content-Type: application/pgp-keys');
+            header('Content-Disposition: attachment; filename="' . $filename . '"');
+
+            if ($fp = fopen('php://output', 'w')) {
+                foreach ($list as $key) {
+                    $engine->export_key(is_object($key) ? $key->id : $key, $fp);
+                }
+            }
+        }
+
+        exit;
     }
 
     /**
@@ -594,12 +677,11 @@ class enigma_ui
      */
     private function key_delete()
     {
-        $keys = rcube_utils::get_input_value('_keys', rcube_utils::INPUT_POST);
-
-        $this->enigma->load_engine();
+        $keys   = rcube_utils::get_input_value('_keys', rcube_utils::INPUT_POST);
+        $engine = $this->enigma->load_engine();
 
         foreach ((array)$keys as $key) {
-            $res = $this->enigma->engine->delete_key($key);
+            $res = $engine->delete_key($key);
 
             if ($res !== true) {
                 $this->rc->output->show_message('enigma.keyremoveerror', 'error');
@@ -691,11 +773,11 @@ class enigma_ui
                 $attrib['class'] = 'enigmaerror';
                 $code            = $status->getCode();
 
-                if ($code == enigma_error::E_KEYNOTFOUND) {
+                if ($code == enigma_error::KEYNOTFOUND) {
                     $msg = rcube::Q(str_replace('$keyid', enigma_key::format_id($status->getData('id')),
                         $this->enigma->gettext('decryptnokey')));
                 }
-                else if ($code == enigma_error::E_BADPASS) {
+                else if ($code == enigma_error::BADPASS) {
                     $msg = rcube::Q($this->enigma->gettext('decryptbadpass'));
                     $this->password_prompt($status);
                 }
@@ -723,7 +805,7 @@ class enigma_ui
             if ($sig instanceof enigma_signature) {
                 $sender = ($sig->name ? $sig->name . ' ' : '') . '<' . $sig->email . '>';
 
-                if ($sig->valid === enigma_error::E_UNVERIFIED) {
+                if ($sig->valid === enigma_error::UNVERIFIED) {
                     $attrib['class'] = 'enigmawarning';
                     $msg = str_replace('$sender', $sender, $this->enigma->gettext('sigunverified'));
                     $msg = str_replace('$keyid', $sig->id, $msg);
@@ -738,7 +820,7 @@ class enigma_ui
                     $msg = rcube::Q(str_replace('$sender', $sender, $this->enigma->gettext('siginvalid')));
                 }
             }
-            else if ($sig && $sig->getCode() == enigma_error::E_KEYNOTFOUND) {
+            else if ($sig && $sig->getCode() == enigma_error::KEYNOTFOUND) {
                 $attrib['class'] = 'enigmawarning';
                 $msg = rcube::Q(str_replace('$keyid', enigma_key::format_id($sig->getData('id')),
                     $this->enigma->gettext('signokey')));
@@ -857,11 +939,11 @@ class enigma_ui
         if ($mode && ($status instanceof enigma_error)) {
             $code = $status->getCode();
 
-            if ($code == enigma_error::E_KEYNOTFOUND) {
+            if ($code == enigma_error::KEYNOTFOUND) {
                 $vars = array('email' => $status->getData('missing'));
                 $msg  = 'enigma.' . $mode . 'nokey';
             }
-            else if ($code == enigma_error::E_BADPASS) {
+            else if ($code == enigma_error::BADPASS) {
                 $msg  = 'enigma.' . $mode . 'badpass';
                 $type = 'warning';
 
@@ -899,11 +981,11 @@ class enigma_ui
             if ($status instanceof enigma_error) {
                 $code = $status->getCode();
 
-                if ($code == enigma_error::E_KEYNOTFOUND) {
+                if ($code == enigma_error::KEYNOTFOUND) {
                     $msg = rcube::Q(str_replace('$keyid', enigma_key::format_id($status->getData('id')),
                         $this->enigma->gettext('decryptnokey')));
                 }
-                else if ($code == enigma_error::E_BADPASS) {
+                else if ($code == enigma_error::BADPASS) {
                     $this->password_prompt($status, array('compose-init' => true));
                     return $p;
                 }

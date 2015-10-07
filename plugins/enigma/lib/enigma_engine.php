@@ -146,7 +146,7 @@ class enigma_engine
         $key = $this->find_key($from, true);
 
         if (empty($key)) {
-            return new enigma_error(enigma_error::E_KEYNOTFOUND);
+            return new enigma_error(enigma_error::KEYNOTFOUND);
         }
 
         // check if we have password for this key
@@ -156,7 +156,7 @@ class enigma_engine
         if ($pass === null) {
             // ask for password
             $error = array('missing' => array($key->id => $key->name));
-            return new enigma_error(enigma_error::E_BADPASS, '', $error);
+            return new enigma_error(enigma_error::BADPASS, '', $error);
         }
 
         // select mode
@@ -197,10 +197,10 @@ class enigma_engine
         $result = $this->pgp_sign($body, $key->id, $pass, $pgp_mode);
 
         if ($result !== true) {
-            if ($result->getCode() == enigma_error::E_BADPASS) {
+            if ($result->getCode() == enigma_error::BADPASS) {
                 // ask for password
                 $error = array('missing' => array($key->id => $key->name));
-                return new enigma_error(enigma_error::E_BADPASS, '', $error);
+                return new enigma_error(enigma_error::BADPASS, '', $error);
             }
 
             return $result;
@@ -238,7 +238,7 @@ class enigma_engine
         }
 
         if (empty($recipients)) {
-            return new enigma_error(enigma_error::E_KEYNOTFOUND);
+            return new enigma_error(enigma_error::KEYNOTFOUND);
         }
 
         $recipients = array_unique($recipients);
@@ -248,7 +248,7 @@ class enigma_engine
             $key = $this->find_key($email);
 
             if (empty($key)) {
-                return new enigma_error(enigma_error::E_KEYNOTFOUND, '', array(
+                return new enigma_error(enigma_error::KEYNOTFOUND, '', array(
                     'missing' => $email
                 ));
             }
@@ -444,14 +444,16 @@ class enigma_engine
      */
     private function parse_plain_signed(&$p, $body)
     {
+        if (!$this->rc->config->get('enigma_signatures', true)) {
+            return;
+        }
+
         $this->load_pgp_driver();
         $part = $p['structure'];
 
         // Verify signature
-        if ($this->rc->action == 'show' || $this->rc->action == 'preview') {
-            if ($this->rc->config->get('enigma_signatures', true)) {
-                $sig = $this->pgp_verify($body);
-            }
+        if ($this->rc->action == 'show' || $this->rc->action == 'preview' || $this->rc->action == 'print') {
+            $sig = $this->pgp_verify($body);
         }
 
         // @TODO: Handle big bodies using (temp) files
@@ -505,7 +507,7 @@ class enigma_engine
             return;
         }
 
-        if ($this->rc->action != 'show' && $this->rc->action != 'preview') {
+        if ($this->rc->action != 'show' && $this->rc->action != 'preview' && $this->rc->action != 'print') {
             return;
         }
 
@@ -552,7 +554,7 @@ class enigma_engine
         }
 
         // Verify signature
-        if ($this->rc->action == 'show' || $this->rc->action == 'preview') {
+        if ($this->rc->action == 'show' || $this->rc->action == 'preview' || $this->rc->action == 'print') {
             $this->load_smime_driver();
 
             $struct   = $p['structure'];
@@ -695,6 +697,10 @@ class enigma_engine
             // Make sure decryption status message will be displayed
             $part->type = 'content';
             $p['object']->parts[] = $part;
+
+            // don't show encrypted part on attachments list
+            // don't show "cannot display encrypted message" text
+            $p['abort'] = true;
         }
     }
 
@@ -725,7 +731,7 @@ class enigma_engine
         // @TODO: Handle big bodies using (temp) files
         $sig = $this->pgp_driver->verify($msg_body, $sig_body);
 
-        if (($sig instanceof enigma_error) && $sig->getCode() != enigma_error::E_KEYNOTFOUND)
+        if (($sig instanceof enigma_error) && $sig->getCode() != enigma_error::KEYNOTFOUND)
             rcube::raise_error(array(
                 'code' => 600, 'type' => 'php',
                 'file' => __FILE__, 'line' => __LINE__,
@@ -750,7 +756,7 @@ class enigma_engine
 
         if ($result instanceof enigma_error) {
             $err_code = $result->getCode();
-            if (!in_array($err_code, array(enigma_error::E_KEYNOTFOUND, enigma_error::E_BADPASS)))
+            if (!in_array($err_code, array(enigma_error::KEYNOTFOUND, enigma_error::BADPASS)))
                 rcube::raise_error(array(
                     'code' => 600, 'type' => 'php',
                     'file' => __FILE__, 'line' => __LINE__,
@@ -781,7 +787,7 @@ class enigma_engine
 
         if ($result instanceof enigma_error) {
             $err_code = $result->getCode();
-            if (!in_array($err_code, array(enigma_error::E_KEYNOTFOUND, enigma_error::E_BADPASS)))
+            if (!in_array($err_code, array(enigma_error::KEYNOTFOUND, enigma_error::BADPASS)))
                 rcube::raise_error(array(
                     'code' => 600, 'type' => 'php',
                     'file' => __FILE__, 'line' => __LINE__,
@@ -810,7 +816,7 @@ class enigma_engine
 
         if ($result instanceof enigma_error) {
             $err_code = $result->getCode();
-            if (!in_array($err_code, array(enigma_error::E_KEYNOTFOUND, enigma_error::E_BADPASS)))
+            if (!in_array($err_code, array(enigma_error::KEYNOTFOUND, enigma_error::BADPASS)))
                 rcube::raise_error(array(
                     'code' => 600, 'type' => 'php',
                     'file' => __FILE__, 'line' => __LINE__,
@@ -1003,6 +1009,37 @@ class enigma_engine
     }
 
     /**
+     * PGP keys/certs export..
+     *
+     * @param string   Key ID
+     * @param resource Optional output stream
+     *
+     * @return mixed Key content or enigma_error
+     */
+    function export_key($key, $fp = null)
+    {
+        $this->load_pgp_driver();
+        $result = $this->pgp_driver->export($key, $fp);
+
+        if ($result instanceof enigma_error) {
+            rcube::raise_error(array(
+                'code' => 600, 'type' => 'php',
+                'file' => __FILE__, 'line' => __LINE__,
+                'message' => "Enigma plugin: " . $result->getMessage()
+                ), true, false);
+
+            return $result;
+        }
+
+        if ($fp) {
+            fwrite($fp, $result);
+        }
+        else {
+            return $result;
+        }
+    }
+
+    /**
      * Registers password for specified key/cert sent by the password prompt.
      */
     function password_handler()
@@ -1041,7 +1078,7 @@ class enigma_engine
             $config = @unserialize($config);
         }
 
-        $threshold = time() - $this->password_time;
+        $threshold = $this->password_time ? time() - $this->password_time : 0;
         $keys      = array();
 
         // delete expired passwords
